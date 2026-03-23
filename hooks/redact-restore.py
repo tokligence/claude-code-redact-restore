@@ -198,11 +198,11 @@ def redact_content(content, mapping):
 
     for pattern_name, compiled in COMPILED_PATTERNS:
         for match in compiled.finditer(redacted):
-            secret = match.group(0)
-            if len(secret) < 8:
+            matched_value = match.group(0)
+            if len(matched_value) < 8:
                 continue
-            placeholder = get_placeholder(mapping, secret, pattern_name)
-            redacted = redacted.replace(secret, placeholder)
+            placeholder = get_placeholder(mapping, matched_value, pattern_name)
+            redacted = redacted.replace(matched_value, placeholder)
             found_any = True
 
     return redacted, found_any
