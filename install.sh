@@ -65,7 +65,7 @@ fi
 # Merge into settings.json
 echo "  -> Configuring Claude Code settings..."
 
-HOOK_CONFIG='{
+PRE_HOOK_CONFIG='{
   "matcher": "Read|Write|Edit|Bash",
   "hooks": [
     {
@@ -76,8 +76,16 @@ HOOK_CONFIG='{
   ]
 }'
 
-# Also define old hook config for cleanup
-OLD_HOOK_CMD="~/.claude/hooks/redact-secrets.sh"
+POST_HOOK_CONFIG='{
+  "matcher": "Read",
+  "hooks": [
+    {
+      "type": "command",
+      "command": "python3 ~/.claude/hooks/redact-restore.py",
+      "timeout": 5
+    }
+  ]
+}'
 
 if [ -f "$SETTINGS_FILE" ]; then
   EXISTING=$(cat "$SETTINGS_FILE")
@@ -85,26 +93,39 @@ if [ -f "$SETTINGS_FILE" ]; then
   HAS_HOOKS=$(echo "$EXISTING" | jq 'has("hooks")' 2>/dev/null || echo "false")
 
   if [ "$HAS_HOOKS" = "true" ]; then
-    # Remove any old hook entries (both old bash hook and previous python hook)
-    UPDATED=$(echo "$EXISTING" | jq --argjson hook "$HOOK_CONFIG" '
+    # Remove any old hook entries, add both PreToolUse and PostToolUse
+    UPDATED=$(echo "$EXISTING" | jq \
+      --argjson pre_hook "$PRE_HOOK_CONFIG" \
+      --argjson post_hook "$POST_HOOK_CONFIG" '
       .hooks.PreToolUse = (
         (.hooks.PreToolUse // [])
         | map(select(
             (.hooks[0].command != "~/.claude/hooks/redact-secrets.sh") and
             (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
           ))
-      ) + [$hook]
+      ) + [$pre_hook]
+      |
+      .hooks.PostToolUse = (
+        (.hooks.PostToolUse // [])
+        | map(select(
+            (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
+          ))
+      ) + [$post_hook]
     ')
   else
-    UPDATED=$(echo "$EXISTING" | jq --argjson hook "$HOOK_CONFIG" '
-      .hooks = { "PreToolUse": [$hook] }
+    UPDATED=$(echo "$EXISTING" | jq \
+      --argjson pre_hook "$PRE_HOOK_CONFIG" \
+      --argjson post_hook "$POST_HOOK_CONFIG" '
+      .hooks = { "PreToolUse": [$pre_hook], "PostToolUse": [$post_hook] }
     ')
   fi
 
   echo "$UPDATED" | jq '.' > "$SETTINGS_FILE"
 else
-  jq -n --argjson hook "$HOOK_CONFIG" '{
-    hooks: { PreToolUse: [$hook] }
+  jq -n \
+    --argjson pre_hook "$PRE_HOOK_CONFIG" \
+    --argjson post_hook "$POST_HOOK_CONFIG" '{
+    hooks: { PreToolUse: [$pre_hook], PostToolUse: [$post_hook] }
   }' > "$SETTINGS_FILE"
 fi
 

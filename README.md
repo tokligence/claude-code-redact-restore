@@ -4,7 +4,7 @@ Prevent [Claude Code](https://claude.ai/code) from seeing your secrets. Secrets 
 
 ## The Problem
 
-Claude Code can read `.env` files, credentials, and private keys in your project. If you're not careful, secrets end up in the conversation context and potentially in logs.
+Claude Code can read files with credentials and private keys in your project. If you are not careful, secrets end up in the conversation context and potentially in logs.
 
 ## The Solution
 
@@ -12,18 +12,9 @@ A Claude Code hook (Python) that implements three strategies:
 
 | Strategy | What it does |
 |----------|-------------|
-| **Block list** | Certain files (`.env`, `credentials.json`, `id_rsa`, etc.) are never read at all |
-| **Smart redact** | Secrets in *any* file are replaced with consistent `{{PLACEHOLDER}}` tokens before Claude sees them |
+| **Block list** | Certain files are never read at all |
+| **Smart redact** | Secrets in *any* file are replaced with consistent placeholder tokens before Claude sees them |
 | **Auto restore** | When Claude writes/edits files or runs commands, placeholders are silently restored to real values |
-
-```
-You: "Read config.py"
-Claude sees:  API_KEY = "{{OPENAI_KEY_1}}"
-
-You: "Update the API key variable name"
-Claude writes: OPENAI_API_KEY = "{{OPENAI_KEY_1}}"
-Actually saved: OPENAI_API_KEY = "sk-proj-aBcDeFgHiJkLmNoPqRsTuVwXyZ..."
-```
 
 ## Install
 
@@ -41,25 +32,112 @@ Restart Claude Code after installing.
 curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main/uninstall.sh | sh
 ```
 
-## How It Works
+## Architecture
 
-### Strategy 1: Block List
+### System Overview
 
-Files matching these names are completely blocked from being read:
+```
+~/.claude/
+  settings.json          # Hook registration (PreToolUse + PostToolUse)
+  hooks/
+    redact-restore.py    # Main hook script (handles both Pre and Post)
+    patterns.py          # 100+ secret regex patterns (upstream, updated on install)
+    custom-patterns.py   # User custom patterns (never overwritten)
 
-| Pattern | Examples |
-|---------|----------|
-| `.env*` | `.env`, `.env.local`, `.env.production`, `.env.staging` |
-| `credential*` | `credential.json`, `credentials.json` |
-| `secrets.*` | `secrets.yaml`, `secrets.json`, `secrets.toml` |
-| SSH keys | `id_rsa`, `id_ed25519`, `id_ecdsa` |
-| Certificates | `.pem`, `.p12`, `.pfx` |
-| Cloud creds | `service-account.json`, `gcp-credentials.json` |
-| Auth files | `.npmrc`, `.pypirc`, `.git-credentials`, `.netrc` |
+/tmp/
+  .claude-redact-{session_id}.json   # Secret-to-placeholder mapping (chmod 600)
+  .claude-backup-{session_id}/       # Temporary file backups during Read
+```
 
-### Strategy 2: Smart Redact
+### Hook Registration
 
-For every other file, the hook scans content against 100+ secret patterns (ported from [gitleaks](https://github.com/gitleaks/gitleaks) and tokligence_guard). Detected patterns include:
+The hook registers for **two** Claude Code hook events:
+
+| Hook Event | Matcher | Purpose |
+|------------|---------|---------|
+| PreToolUse | Read, Write, Edit, Bash | Intercept tool calls before execution |
+| PostToolUse | Read | Restore original file content after Read completes |
+
+### Request Processing Flow
+
+```
+Claude Code issues a tool call (Read, Write, Edit, or Bash)
+        |
+        v
+  PreToolUse Hook
+        |
+  +-----+------+------+------+
+  |            |         |         |
+  v            v         v         v
+ Read       Write     Edit      Bash
+  |            |         |         |
+  v            v         v         v
+ Block       Load      Load     Block
+ list?       mapping   mapping  list?
+  |            |         |         |
+  v            v         v         v
+ Read file   Restore   Restore  Restore
+ Scan for    place-    place-   place-
+ secrets     holders   holders  holders
+  |            |         |         |
+  v            v         v         v
+ Backup +    allow      allow    allow
+ overwrite   with       with     with
+ with        update     update   update
+ redacted
+  |
+  v
+  allow
+        |
+        v
+  Claude Code executes tool (with real values restored)
+        |
+        v
+  PostToolUse Hook (Read only)
+        |
+        v
+  Restore original file from backup
+```
+
+### Detailed Read Flow (The Core Mechanism)
+
+```
+1. PreToolUse fires for Read(/path/to/config.py)
+2. Hook reads the file from disk
+3. Hook scans content against 100+ regex patterns
+4. Hook creates/loads session mapping (secret <-> placeholder)
+5. Hook backs up original file to /tmp/.claude-backup-{session}/
+6. Hook overwrites original with redacted content (preserves timestamps)
+7. Hook exits 0 (allow) -- Claude Code reads file normally
+   -> Claude Code registers the file as read (KEY!)
+   -> Claude sees redacted content with placeholders
+8. PostToolUse fires -- hook restores original from backup
+```
+
+**Why this design?** Claude Code tracks which files have been "read" internally.
+If the Read tool is denied or redirected to a temp file, Claude Code will not
+register the original file path as read. Then Write/Edit to that file fails with
+"file has not been read yet". By temporarily overwriting the original file with
+redacted content and allowing Read to proceed normally, we satisfy Claude Code's
+internal tracking.
+
+### Session Mapping Consistency
+
+The secret-to-placeholder mapping persists across all hook invocations within a
+session via /tmp/.claude-redact-{session_id}.json. The same secret always maps
+to the same placeholder. When Claude writes code using a placeholder, the Write
+hook loads the mapping and restores the real value transparently.
+
+### Crash Recovery
+
+If Claude Code crashes between PreToolUse (file overwritten) and PostToolUse
+(file restored), the backup remains on disk. On the next hook invocation,
+restore_pending_backups() runs at startup and restores any orphaned backups
+automatically.
+
+## Supported Secret Patterns
+
+100+ patterns ported from gitleaks and tokligence_guard:
 
 - **AI/ML:** OpenAI, Anthropic, Groq, Perplexity, Hugging Face, Replicate, DeepSeek
 - **Cloud:** AWS, GCP/Firebase, Azure, DigitalOcean, Alibaba, Tencent
@@ -70,50 +148,18 @@ For every other file, the hook scans content against 100+ secret patterns (porte
 - **Monitoring:** New Relic, Sentry, Dynatrace
 - **Other:** Shopify, HubSpot, Postman, PlanetScale, Contentful, and many more
 
-Each detected secret is replaced with a consistent placeholder like `{{GITHUB_PAT_CLASSIC_1}}`. The same secret always maps to the same placeholder within a session.
-
-### Strategy 3: Auto Restore
-
-When Claude Code calls Write, Edit, or Bash tools, the hook intercepts the input and replaces any placeholders back to their real values. This is transparent to both you and Claude.
-
-### Session Mapping
-
-The secret-to-placeholder mapping is stored at `/tmp/.claude-redact-{session_id}.json` with `chmod 600`. Each Claude Code session gets its own mapping file. Mappings are cleaned up on uninstall.
-
 ## Custom Patterns
 
-You can add your own secret patterns **without modifying upstream files**. Custom patterns survive upgrades because `install.sh` never overwrites your custom file.
+Add your own patterns in ~/.claude/hooks/custom-patterns.py (never overwritten by install):
 
-### Setup
-
-1. Copy the example file:
-   ```bash
-   cp ~/.claude/hooks/custom-patterns.example.py ~/.claude/hooks/custom-patterns.py
-   ```
-
-2. Edit `~/.claude/hooks/custom-patterns.py` to add your patterns:
-   ```python
-   CUSTOM_SECRET_PATTERNS = [
-       ("MY_INTERNAL_TOKEN", r"mycompany_tok_[A-Za-z0-9]{32,}"),
-       ("INTERNAL_API_KEY", r"int_key_[a-f0-9]{64}"),
-   ]
-
-   CUSTOM_BLOCKED_FILES = [
-       "my-secret-config.yaml",
-       ".internal-credentials",
-   ]
-   ```
-
-### How it works
-
-- `patterns.py` contains upstream patterns and is **updated on each install**
-- `custom-patterns.py` contains your patterns and is **never overwritten**
-- Both are loaded at runtime and merged together
-- Re-running `install.sh` is safe: it updates upstream patterns without affecting your custom ones
-
-### Editing upstream patterns
-
-You can also edit `~/.claude/hooks/patterns.py` directly, but note that re-running `install.sh` will overwrite it. For persistent customizations, always use `custom-patterns.py`.
+```python
+CUSTOM_SECRET_PATTERNS = [
+    ("MY_INTERNAL_TOKEN", r"mycompany_tok_[A-Za-z0-9]{32,}"),
+]
+CUSTOM_BLOCKED_FILES = [
+    "my-secret-config.yaml",
+]
+```
 
 ## Running Tests
 
@@ -121,54 +167,12 @@ You can also edit `~/.claude/hooks/patterns.py` directly, but note that re-runni
 python3 test_hook.py
 ```
 
-Tests cover:
-- Block list for known secret files
-- Redaction of OpenAI, GitHub, AWS, Stripe, SendGrid, database URL, and private key patterns
-- Consistent placeholder mapping (same secret = same placeholder)
-- Mapping persistence across separate hook invocations
-- Restore on Write, Edit, and Bash tool calls
-- Bash command blocking (cat .env, source .env, etc.)
-- Mapping file permissions (600)
-- Performance (< 100ms per invocation)
+Tests cover block list, redaction, backup/restore, crash recovery,
+read-then-write cycle (the key bug fix), and performance.
 
 ## Performance
 
-The hook executes in ~10-30ms per tool call (Python startup + regex compilation). All patterns are compiled once per invocation. The mapping file is a small JSON file read/written with standard I/O.
-
-## Architecture
-
-```
-Claude Code tool call
-        |
-        v
-  PreToolUse hook
-        |
-        +---> Read: block list check -> read file -> scan patterns -> deny with redacted content
-        |
-        +---> Write/Edit: load mapping -> restore placeholders -> allow with updated input
-        |
-        +---> Bash: block list check -> restore placeholders in command -> allow with updated input
-        |
-        v
-  Claude Code executes tool (with real values restored)
-```
-
-## FAQ
-
-**Q: Does this affect the current session?**
-A: No, hooks take effect on the next Claude Code session.
-
-**Q: Can Claude still use environment variables at runtime?**
-A: Yes. It just can't see the raw values. Placeholders work transparently.
-
-**Q: What if I need Claude to see a specific secret?**
-A: Remove the pattern from `~/.claude/hooks/patterns.py` or temporarily uninstall.
-
-**Q: Is any data sent externally?**
-A: No. Everything runs locally. The mapping file is on your filesystem with restricted permissions.
-
-**Q: What happens if the hook crashes?**
-A: The hook is designed to fail open. If it cannot parse input or read files, it allows the operation to proceed normally.
+~10-30ms per tool call (Python startup + regex compilation).
 
 ## License
 

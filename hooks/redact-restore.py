@@ -7,14 +7,16 @@ Strategy 2: Pattern-based redact — secrets in ANY file are replaced with consi
 Strategy 3: Restore on write — placeholders are restored to real values when writing files
 
 Session mapping stored at: /tmp/.claude-redact-{session_id}.json
+File backups stored at:    /tmp/.claude-backup-{session_id}/
 
 Hook input (stdin JSON):
   - tool_name: "Read" | "Write" | "Edit" | "Bash"
   - tool_input: { file_path, content, command, ... }
   - session_id: string
+  - tool_result: (only present for PostToolUse hooks)
 
 Hook output (stdout JSON):
-  hookSpecificOutput.hookEventName = "PreToolUse"
+  hookSpecificOutput.hookEventName = "PreToolUse" | "PostToolUse"
   hookSpecificOutput.permissionDecision = "allow" | "deny"
   hookSpecificOutput.permissionDecisionReason = string (when deny)
   hookSpecificOutput.updatedInput = {...} (when allow with modifications)
@@ -28,6 +30,9 @@ import sys
 import json
 import os
 import re
+import hashlib
+import tempfile
+import shutil
 
 # ── Load patterns ────────────────────────────────────────────────────────
 # Import from patterns.py in the same directory, or fall back to inline
@@ -87,27 +92,62 @@ except Exception:
     pass
 
 # ── Compile patterns once ────────────────────────────────────────────────
-# This runs once per invocation. Python process startup + compile is ~5-20ms.
 COMPILED_PATTERNS = []
 for name, regex in SECRET_PATTERNS:
     try:
         COMPILED_PATTERNS.append((name, re.compile(regex)))
     except re.error:
-        # Skip invalid regex rather than crashing the hook
         pass
 
 # ── Read hook input ──────────────────────────────────────────────────────
 try:
     input_data = json.loads(sys.stdin.read())
 except (json.JSONDecodeError, EOFError):
-    # If we can't parse input, allow the operation (fail open)
     sys.exit(0)
 
 tool_name = input_data.get("tool_name", "")
 tool_input = input_data.get("tool_input", {})
 session_id = input_data.get("session_id", "default")
+is_post_hook = "tool_result" in input_data
 
 MAPPING_FILE = f"/tmp/.claude-redact-{session_id}.json"
+BACKUP_DIR = os.path.join(tempfile.gettempdir(), f".claude-backup-{session_id}")
+
+
+# ── Backup management ───────────────────────────────────────────────────
+def backup_path_for(file_path):
+    """Get the backup file path prefix for a given original file."""
+    path_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
+    return os.path.join(BACKUP_DIR, path_hash)
+
+
+def restore_pending_backups():
+    """Restore any pending backups from a previous crash."""
+    if not os.path.isdir(BACKUP_DIR):
+        return
+    for entry in os.listdir(BACKUP_DIR):
+        if not entry.endswith(".meta"):
+            continue
+        meta_path = os.path.join(BACKUP_DIR, entry)
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            original_path = meta["original_path"]
+            bak_path = os.path.join(BACKUP_DIR, entry[:-5] + ".bak")
+            if os.path.exists(bak_path) and os.path.isfile(original_path):
+                shutil.copy2(bak_path, original_path)
+            for p in (meta_path, bak_path):
+                if os.path.exists(p):
+                    os.remove(p)
+        except (json.JSONDecodeError, OSError, KeyError):
+            try:
+                os.remove(meta_path)
+            except OSError:
+                pass
+
+
+# Always try to restore pending backups on startup (crash recovery)
+restore_pending_backups()
 
 
 # ── Mapping management ───────────────────────────────────────────────────
@@ -159,7 +199,6 @@ def redact_content(content, mapping):
     for pattern_name, compiled in COMPILED_PATTERNS:
         for match in compiled.finditer(redacted):
             secret = match.group(0)
-            # Skip very short matches (likely false positives)
             if len(secret) < 8:
                 continue
             placeholder = get_placeholder(mapping, secret, pattern_name)
@@ -214,6 +253,33 @@ def allow_with_update(updated_input):
     sys.exit(0)
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# PostToolUse: Restore file backups after Read completes
+# ══════════════════════════════════════════════════════════════════════════
+if is_post_hook:
+    if tool_name == "Read":
+        file_path = tool_input.get("file_path", "")
+        if file_path:
+            bp = backup_path_for(file_path)
+            bak_file = bp + ".bak"
+            meta_file = bp + ".meta"
+            if os.path.exists(bak_file):
+                try:
+                    shutil.copy2(bak_file, file_path)
+                except OSError:
+                    pass
+                for p in (bak_file, meta_file):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+    sys.exit(0)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# PreToolUse handlers below
+# ══════════════════════════════════════════════════════════════════════════
+
 # ── Handle Read tool ─────────────────────────────────────────────────────
 if tool_name == "Read":
     file_path = tool_input.get("file_path", "")
@@ -226,27 +292,59 @@ if tool_name == "Read":
             f"(matched '{matched_pattern}'). Use .env.example or ask the user for guidance."
         )
 
-    # Strategy 2: Read file ourselves, scan for secrets, return redacted content
+    # Strategy 2: Backup original, overwrite with redacted content, allow Read.
+    # The Read tool proceeds on the original file path (now containing redacted
+    # content), so Claude Code registers the file as "read". A PostToolUse hook
+    # restores the original content after the Read completes.
     if file_path and os.path.isfile(file_path):
         try:
-            with open(file_path, "r", errors="replace") as f:
-                content = f.read()
+            with open(file_path, "rb") as f:
+                raw_bytes = f.read()
+            raw_content = raw_bytes.decode("utf-8", errors="replace")
         except (OSError, PermissionError):
-            # Can't read the file — let Claude Code handle the error
             sys.exit(0)
 
         mapping = load_mapping()
-        redacted, found_secrets = redact_content(content, mapping)
+        redacted, found_secrets = redact_content(raw_content, mapping)
 
         if found_secrets:
             save_mapping(mapping)
-            deny(
-                f"This file contains secrets that have been redacted for safety. "
-                f"Here is the redacted content of {file_path}:\n\n"
-                f"{redacted}\n\n"
-                f"(Placeholders like {{{{OPENAI_KEY_1}}}} represent real secret values. "
-                f"Use them as-is in code — they will be automatically restored when you write files.)"
-            )
+
+            os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+            bp = backup_path_for(file_path)
+
+            try:
+                # Save original content as backup (binary to preserve exact bytes)
+                fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(raw_bytes)
+                with open(bp + ".meta", "w") as f:
+                    json.dump({"original_path": file_path}, f)
+
+                # Overwrite original with redacted content, preserving timestamps
+                stat = os.stat(file_path)
+                with open(file_path, "w") as f:
+                    f.write(redacted)
+                os.utime(file_path, (stat.st_atime, stat.st_mtime))
+
+                # Allow Read to proceed on the original path (now redacted).
+                # PostToolUse will restore the original content afterward.
+                sys.exit(0)
+            except (OSError, PermissionError):
+                # Can't overwrite (e.g. read-only file) — clean up backup and
+                # fall back to deny with redacted content in the reason.
+                for suffix in (".bak", ".meta"):
+                    try:
+                        os.remove(bp + suffix)
+                    except OSError:
+                        pass
+                deny(
+                    f"This file contains secrets that have been redacted for safety. "
+                    f"Here is the redacted content of {file_path}:\n\n"
+                    f"{redacted}\n\n"
+                    f"(Placeholders like {{{{OPENAI_KEY_1}}}} represent real secret values. "
+                    f"Use them as-is in code — they will be automatically restored when you write files.)"
+                )
 
     # No secrets found — allow normal read
     sys.exit(0)
@@ -300,7 +398,6 @@ if tool_name == "Bash":
             command
         ):
             deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
-        # Also catch redirections: < .env
         if re.search(rf"<\s*[^\s]*{escaped}", command):
             deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
 
