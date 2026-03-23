@@ -77,7 +77,7 @@ PRE_HOOK_CONFIG='{
 }'
 
 POST_HOOK_CONFIG='{
-  "matcher": "Read",
+  "matcher": "Read|Write|Edit",
   "hooks": [
     {
       "type": "command",
@@ -87,6 +87,16 @@ POST_HOOK_CONFIG='{
   ]
 }'
 
+
+STOP_HOOK_CONFIG='{
+  "hooks": [
+    {
+      "type": "command",
+      "command": "python3 ~/.claude/hooks/redact-restore.py",
+      "timeout": 5
+    }
+  ]
+}'
 if [ -f "$SETTINGS_FILE" ]; then
   EXISTING=$(cat "$SETTINGS_FILE")
 
@@ -96,7 +106,7 @@ if [ -f "$SETTINGS_FILE" ]; then
     # Remove any old hook entries, add both PreToolUse and PostToolUse
     UPDATED=$(echo "$EXISTING" | jq \
       --argjson pre_hook "$PRE_HOOK_CONFIG" \
-      --argjson post_hook "$POST_HOOK_CONFIG" '
+      --argjson post_hook "$POST_HOOK_CONFIG"       --argjson stop_hook "$STOP_HOOK_CONFIG" '
       .hooks.PreToolUse = (
         (.hooks.PreToolUse // [])
         | map(select(
@@ -111,12 +121,14 @@ if [ -f "$SETTINGS_FILE" ]; then
             (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
           ))
       ) + [$post_hook]
+      |
+      .hooks.Stop = [$stop_hook]
     ')
   else
     UPDATED=$(echo "$EXISTING" | jq \
       --argjson pre_hook "$PRE_HOOK_CONFIG" \
       --argjson post_hook "$POST_HOOK_CONFIG" '
-      .hooks = { "PreToolUse": [$pre_hook], "PostToolUse": [$post_hook] }
+      .hooks = { "PreToolUse": [$pre_hook], "PostToolUse": [$post_hook], "Stop": [$stop_hook] }
     ')
   fi
 
@@ -125,7 +137,7 @@ else
   jq -n \
     --argjson pre_hook "$PRE_HOOK_CONFIG" \
     --argjson post_hook "$POST_HOOK_CONFIG" '{
-    hooks: { PreToolUse: [$pre_hook], PostToolUse: [$post_hook] }
+    hooks: { PreToolUse: [$pre_hook], PostToolUse: [$post_hook], Stop: [$stop_hook] }
   }' > "$SETTINGS_FILE"
 fi
 

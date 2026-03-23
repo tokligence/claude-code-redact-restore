@@ -149,6 +149,68 @@ def test_read_write_cycle():
         print("  PASS: read-then-write cycle (bug fix verified)")
     finally: os.unlink(f)
 
+
+
+def test_edit_after_read_freshness():
+    """Edit after Read on file with secrets must work (freshness check fix)."""
+    cleanup()
+    s = 'ghp_' + 'E' * 36
+    orig = 'TOKEN=' + s + chr(10) + 'DEBUG=true' + chr(10)
+    f = _tmp(orig)
+    try:
+        # Read (pre + post)
+        run_hook('Read', {'file_path': f})
+        run_hook('Read', {'file_path': f}, is_post=True)
+        # File should be restored to original
+        with open(f) as fh:
+            assert fh.read() == orig
+
+        # Edit PreToolUse: re-redacts file for freshness check
+        run_hook('Edit', {'file_path': f, 'old_string': 'DEBUG=true', 'new_string': 'DEBUG=false'})
+        with open(f) as fh:
+            redacted = fh.read()
+        assert _ph_prefix('GITHUB_PAT_CLASSIC_') in redacted
+
+        # Simulate what Claude Code's Edit tool does: replace in file
+        with open(f) as fh:
+            edited = fh.read().replace('DEBUG=true', 'DEBUG=false')
+        with open(f, 'w') as fh:
+            fh.write(edited)
+
+        # Edit PostToolUse: restore placeholders in the edited file
+        run_hook('Edit', {'file_path': f}, is_post=True)
+        with open(f) as fh:
+            final = fh.read()
+        assert s in final, 'Real secret not restored'
+        assert 'DEBUG=false' in final, 'Edit not preserved'
+        assert 'DEBUG=true' not in final, 'Old value still present' 
+        print('  PASS: edit after read freshness fix')
+    finally:
+        os.unlink(f)
+
+
+def test_write_after_read_freshness():
+    """Write after Read on file with secrets must work (freshness check fix)."""
+    cleanup()
+    s = 'ghp_' + 'G' * 36
+    orig = 'TOKEN=' + s + chr(10)
+    f = _tmp(orig)
+    try:
+        run_hook('Read', {'file_path': f})
+        run_hook('Read', {'file_path': f}, is_post=True)
+
+        # Write with placeholder
+        ph = _ph('GITHUB_PAT_CLASSIC')
+        o, c = run_hook('Write', {'file_path': f, 'content': 'NEW_TOKEN=' + ph + chr(10)})
+        assert c == 0 and o is not None
+        assert o['hookSpecificOutput']['updatedInput']['content'] == 'NEW_TOKEN=' + s + chr(10)
+
+        # PostToolUse for Write: just cleanup
+        run_hook('Write', {'file_path': f}, is_post=True)
+        print('  PASS: write after read freshness fix')
+    finally:
+        os.unlink(f)
+
 def test_perf():
     content = chr(10).join(f"S{i}=v{i}" for i in range(100)) + chr(10) + "KEY=ghp_" + "P"*36 + chr(10)
     f = _tmp(content)
@@ -170,7 +232,8 @@ if __name__ == "__main__":
     tests = [test_block_env, test_block_creds, test_block_ssh, test_allow_normal,
              test_redact_github_pat, test_consistent, test_restore_write,
              test_restore_edit, test_post_restore, test_crash_recovery,
-             test_read_write_cycle, test_bash_allow, test_perf]
+             test_read_write_cycle, test_edit_after_read_freshness,
+             test_write_after_read_freshness, test_bash_allow, test_perf]
     print(f"Running {len(tests)} tests...")
     p = f = 0
     for t in tests:

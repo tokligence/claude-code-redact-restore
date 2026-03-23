@@ -56,7 +56,8 @@ The hook registers for **two** Claude Code hook events:
 | Hook Event | Matcher | Purpose |
 |------------|---------|---------|
 | PreToolUse | Read, Write, Edit, Bash | Intercept tool calls before execution |
-| PostToolUse | Read | Restore original file content after Read completes |
+| PostToolUse | Read, Write, Edit | Restore/cleanup files after tool completes |
+| Stop | (all) | Clean up sensitive mapping and backup files on exit |
 
 ### Request Processing Flow
 
@@ -93,10 +94,17 @@ Claude Code issues a tool call (Read, Write, Edit, or Bash)
   Claude Code executes tool (with real values restored)
         |
         v
-  PostToolUse Hook (Read only)
+  PostToolUse Hook (Read, Write, Edit)
         |
         v
-  Restore original file from backup
+  Read:  restore original from backup
+  Edit:  restore placeholders in edited file
+  Write: cleanup backup files
+
+  Stop Hook (on session exit)
+        |
+        v
+  Delete /tmp mapping + backup files
 ```
 
 ### Detailed Read Flow (The Core Mechanism)
@@ -176,4 +184,4 @@ read-then-write cycle (the key bug fix), and performance.
 
 ## License
 
-MIT
+Apache 2.0

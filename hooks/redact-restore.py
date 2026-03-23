@@ -146,8 +146,11 @@ def restore_pending_backups():
                 pass
 
 
-# Always try to restore pending backups on startup (crash recovery)
-restore_pending_backups()
+# Restore pending backups on startup (crash recovery).
+# Only for PreToolUse — PostToolUse means the tool completed normally,
+# so backups from this cycle should be handled by the PostToolUse handler.
+if not is_post_hook:
+    restore_pending_backups()
 
 
 # ── Mapping management ───────────────────────────────────────────────────
@@ -216,6 +219,60 @@ def restore_content(content, mapping):
     return restored
 
 
+def backup_and_redact_file(file_path, mapping):
+    """Backup original file and overwrite with redacted content.
+
+    Used by Read, Write, and Edit PreToolUse handlers so Claude Code's
+    freshness check sees the same content it recorded during Read.
+
+    Returns True if the file was redacted, False otherwise.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            raw_bytes = f.read()
+        raw_content = raw_bytes.decode("utf-8", errors="replace")
+    except (OSError, PermissionError):
+        return False
+
+    redacted, found = redact_content(raw_content, mapping)
+    if not found:
+        return False
+
+    save_mapping(mapping)
+    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+    bp = backup_path_for(file_path)
+
+    try:
+        fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(raw_bytes)
+        with open(bp + ".meta", "w") as f:
+            json.dump({"original_path": file_path}, f)
+
+        stat = os.stat(file_path)
+        with open(file_path, "w") as f:
+            f.write(redacted)
+        os.utime(file_path, (stat.st_atime, stat.st_mtime))
+        return True
+    except (OSError, PermissionError):
+        for suffix in (".bak", ".meta"):
+            try:
+                os.remove(bp + suffix)
+            except OSError:
+                pass
+        return False
+
+
+def cleanup_backup(file_path):
+    """Delete backup files without restoring."""
+    bp = backup_path_for(file_path)
+    for suffix in (".bak", ".meta"):
+        try:
+            os.remove(bp + suffix)
+        except OSError:
+            pass
+
+
 # ── Strategy 1: Check block list ─────────────────────────────────────────
 def is_blocked_file(file_path):
     """Check if a file path matches any blocked pattern."""
@@ -254,27 +311,62 @@ def allow_with_update(updated_input):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# PostToolUse: Restore file backups after Read completes
+# PostToolUse: Restore/cleanup file backups after tool completes
 # ══════════════════════════════════════════════════════════════════════════
 if is_post_hook:
-    if tool_name == "Read":
-        file_path = tool_input.get("file_path", "")
-        if file_path:
-            bp = backup_path_for(file_path)
-            bak_file = bp + ".bak"
-            meta_file = bp + ".meta"
-            if os.path.exists(bak_file):
+    file_path = tool_input.get("file_path", "")
+    if file_path and tool_name in ("Read", "Write", "Edit"):
+        bp = backup_path_for(file_path)
+        bak_file = bp + ".bak"
+        if os.path.exists(bak_file):
+            if tool_name == "Read":
+                # Restore original content after Read
                 try:
                     shutil.copy2(bak_file, file_path)
                 except OSError:
                     pass
-                for p in (bak_file, meta_file):
+            elif tool_name == "Edit":
+                # After Edit: file has edited content with placeholders.
+                # Replace all placeholders with real values.
+                mapping = load_mapping()
+                if mapping.get("placeholder_to_secret"):
                     try:
-                        os.remove(p)
+                        with open(file_path, "r", errors="replace") as f:
+                            edited = f.read()
+                        restored = restore_content(edited, mapping)
+                        if restored != edited:
+                            with open(file_path, "w") as f:
+                                f.write(restored)
                     except OSError:
-                        pass
+                        # Fall back to restoring from backup
+                        try:
+                            shutil.copy2(bak_file, file_path)
+                        except OSError:
+                            pass
+            # For Write: file already has correct content (placeholders
+            # were restored in PreToolUse). Just clean up backup.
+            cleanup_backup(file_path)
     sys.exit(0)
 
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Stop hook: Clean up sensitive mapping and backup files on session exit
+# ══════════════════════════════════════════════════════════════════════════
+if input_data.get("type") == "Stop" or tool_name == "Stop":
+    # Remove the mapping file (contains real secret values)
+    try:
+        if os.path.exists(MAPPING_FILE):
+            os.remove(MAPPING_FILE)
+    except OSError:
+        pass
+    # Remove any leftover backup files
+    if os.path.isdir(BACKUP_DIR):
+        try:
+            shutil.rmtree(BACKUP_DIR)
+        except OSError:
+            pass
+    sys.exit(0)
 
 # ══════════════════════════════════════════════════════════════════════════
 # PreToolUse handlers below
@@ -293,51 +385,18 @@ if tool_name == "Read":
         )
 
     # Strategy 2: Backup original, overwrite with redacted content, allow Read.
-    # The Read tool proceeds on the original file path (now containing redacted
-    # content), so Claude Code registers the file as "read". A PostToolUse hook
-    # restores the original content after the Read completes.
+    # PostToolUse restores the original after Read completes.
     if file_path and os.path.isfile(file_path):
-        try:
-            with open(file_path, "rb") as f:
-                raw_bytes = f.read()
-            raw_content = raw_bytes.decode("utf-8", errors="replace")
-        except (OSError, PermissionError):
-            sys.exit(0)
-
         mapping = load_mapping()
-        redacted, found_secrets = redact_content(raw_content, mapping)
-
-        if found_secrets:
-            save_mapping(mapping)
-
-            os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
-            bp = backup_path_for(file_path)
-
-            try:
-                # Save original content as backup (binary to preserve exact bytes)
-                fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, "wb") as f:
-                    f.write(raw_bytes)
-                with open(bp + ".meta", "w") as f:
-                    json.dump({"original_path": file_path}, f)
-
-                # Overwrite original with redacted content, preserving timestamps
-                stat = os.stat(file_path)
-                with open(file_path, "w") as f:
-                    f.write(redacted)
-                os.utime(file_path, (stat.st_atime, stat.st_mtime))
-
-                # Allow Read to proceed on the original path (now redacted).
-                # PostToolUse will restore the original content afterward.
-                sys.exit(0)
-            except (OSError, PermissionError):
-                # Can't overwrite (e.g. read-only file) — clean up backup and
-                # fall back to deny with redacted content in the reason.
-                for suffix in (".bak", ".meta"):
-                    try:
-                        os.remove(bp + suffix)
-                    except OSError:
-                        pass
+        if backup_and_redact_file(file_path, mapping):
+            sys.exit(0)
+        # backup_and_redact_file failed (e.g. read-only) — try deny fallback
+        try:
+            with open(file_path, "r", errors="replace") as f:
+                raw_content = f.read()
+            redacted, found = redact_content(raw_content, mapping)
+            if found:
+                save_mapping(mapping)
                 deny(
                     f"This file contains secrets that have been redacted for safety. "
                     f"Here is the redacted content of {file_path}:\n\n"
@@ -345,6 +404,8 @@ if tool_name == "Read":
                     f"(Placeholders like {{{{OPENAI_KEY_1}}}} represent real secret values. "
                     f"Use them as-is in code — they will be automatically restored when you write files.)"
                 )
+        except (OSError, PermissionError):
+            pass
 
     # No secrets found — allow normal read
     sys.exit(0)
@@ -356,11 +417,19 @@ if tool_name == "Write":
     if not mapping.get("placeholder_to_secret"):
         sys.exit(0)
 
-    content = tool_input.get("content", "")
-    restored = restore_content(content, mapping)
-    if restored != content:
+    file_path = tool_input.get("file_path", "")
+    write_content = tool_input.get("content", "")
+
+    # Re-redact the file so Claude Code's freshness check passes.
+    # PostToolUse will clean up the backup after Write completes.
+    if file_path and os.path.isfile(file_path):
+        backup_and_redact_file(file_path, mapping)
+
+    # Restore placeholders in the content being written
+    restored = restore_content(write_content, mapping)
+    if restored != write_content:
         allow_with_update({
-            "file_path": tool_input.get("file_path", ""),
+            "file_path": file_path,
             "content": restored
         })
     sys.exit(0)
@@ -372,6 +441,20 @@ if tool_name == "Edit":
     if not mapping.get("placeholder_to_secret"):
         sys.exit(0)
 
+    file_path = tool_input.get("file_path", "")
+
+    # Re-redact the file so Claude Code's freshness check passes and
+    # old_string (which contains placeholders) matches the file content.
+    # PostToolUse will restore all placeholders in the edited file.
+    if file_path and os.path.isfile(file_path):
+        if backup_and_redact_file(file_path, mapping):
+            # File is now redacted — old_string/new_string should already
+            # contain placeholders that match. Don't restore them.
+            sys.exit(0)
+
+    # Fallback (file doesn't exist, no secrets, or backup failed):
+    # restore placeholders in old_string/new_string so they match the
+    # file on disk (which has real values).
     old_string = tool_input.get("old_string", "")
     new_string = tool_input.get("new_string", "")
     restored_old = restore_content(old_string, mapping)
