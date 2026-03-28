@@ -88,25 +88,9 @@ POST_HOOK_CONFIG='{
 }'
 
 
-SESSION_END_HOOK_CONFIG='{
-  "hooks": [
-    {
-      "type": "command",
-      "command": "python3 ~/.claude/hooks/redact-restore.py",
-      "timeout": 5}]
-    }
-  ]
-}'
+SESSION_END_HOOK_CONFIG='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redact-restore.py","timeout":5}]}'
 
-PROMPT_HOOK_CONFIG='{
-  "hooks": [
-    {
-      "type": "command",
-      "command": "python3 ~/.claude/hooks/redact-restore.py",
-      "timeout": 5
-    }
-  ]
-}'
+PROMPT_HOOK_CONFIG='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redact-restore.py","timeout":5}]}'
 if [ -f "$SETTINGS_FILE" ]; then
   EXISTING=$(cat "$SETTINGS_FILE")
 
