@@ -6,76 +6,49 @@ user_invocable: true
 
 # Install Claude Code Secret Redaction
 
-You are installing the `claude-code-redact-restore` hook system. This protects the user's secrets (API keys, tokens, passwords) from being seen by Claude Code.
+The user wants to install secret redaction hooks for Claude Code. This protects API keys, tokens, and passwords from being visible to Claude.
 
-## What it does
+## Step 1: Download and install
 
-- **108 regex patterns** detect secrets in ANY file Claude reads (OpenAI, AWS, GitHub, Stripe, database URLs, private keys, JWTs, etc.)
-- **30 file types** are blocked entirely (.env, credentials.json, id_rsa, .pem, etc.)
-- **Secrets are replaced** with consistent placeholders like `{{OPENAI_KEY_a1b2c3d4}}` before Claude sees them
-- **Placeholders are restored** to real values when Claude writes code
-- **Mapping is encrypted** at rest with Fernet (AES + HMAC-SHA256)
-- **Same secret = same placeholder** across all sessions (HMAC-based, deterministic)
-
-## Installation steps
-
-Run these commands:
+Run this single command:
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/tokligence/claude-code-redact-restore.git ~/.claude-redact-restore
-
-# 2. Run the installer
-bash ~/.claude-redact-restore/install.sh
+git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
 ```
 
-The installer will:
-1. Copy hook scripts to `~/.claude/hooks/`
-2. Register 3 hooks in Claude Code settings (PreToolUse, PostToolUse, SessionEnd)
-3. Generate an HMAC key at `~/.claude/.redact-hmac-key` (first run only)
+This will:
+1. Clone the repo to a temp directory
+2. Copy hook scripts to `~/.claude/hooks/`
+3. Register PreToolUse + PostToolUse + SessionEnd hooks in Claude Code settings
+4. Clean up the temp clone
 
-## Verify installation
+## Step 2: Verify
 
 ```bash
-# Check hooks are registered
-cat ~/.claude/settings.json | python3 -c "import sys,json; h=json.load(sys.stdin).get('hooks',{}); print(f'PreToolUse: {len(h.get(\"PreToolUse\",[]))} hooks'); print(f'PostToolUse: {len(h.get(\"PostToolUse\",[]))} hooks'); print(f'SessionEnd: {len(h.get(\"SessionEnd\",[]))} hooks')"
-
-# Test with a fake secret
-echo 'API_KEY=sk-proj-EXAMPLE-TEST-1234567890123456' > /tmp/test-redact.txt
-echo '{"tool_name":"Read","tool_input":{"file_path":"/tmp/test-redact.txt"},"session_id":"test"}' | python3 ~/.claude/hooks/redact-restore.py
-cat /tmp/test-redact.txt  # Should show {{OPENAI_PROJECT_KEY_...}} instead of the key
-# Clean up
-rm /tmp/test-redact.txt
+# Check hooks registered
+python3 -c "import json; h=json.load(open('$HOME/.claude/settings.json')).get('hooks',{}); print(f'Hooks: Pre={len(h.get(\"PreToolUse\",[]))}, Post={len(h.get(\"PostToolUse\",[]))}, Session={len(h.get(\"SessionEnd\",[])))}')"
 ```
 
-## Uninstall
+Expected output: `Hooks: Pre=1, Post=1, Session=1`
+
+## Step 3: Restart Claude Code
+
+The user must restart Claude Code (or start a new session) for hooks to take effect.
+
+## What happens after installation
+
+- When Claude reads any file, secrets are automatically replaced with placeholders like `{{OPENAI_KEY_a1b2c3d4}}`
+- When Claude writes code, placeholders are silently restored to real values
+- 108 secret patterns detected (OpenAI, AWS, GitHub, Stripe, database URLs, private keys, JWTs, etc.)
+- 30 sensitive file types blocked entirely (.env, credentials.json, id_rsa, etc.)
+- Mapping encrypted at rest with Fernet
+
+## To uninstall later
 
 ```bash
-bash ~/.claude-redact-restore/uninstall.sh
+git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/uninstall.sh && rm -rf /tmp/claude-redact-install
 ```
 
-## Important: Security scope
+## Important security note
 
-This tool prevents Claude from **seeing** your secrets in files. It does NOT prevent:
-- Claude running arbitrary code to access secrets (e.g., `python3 -c "open('.env').read()"`)
-- Prompt injection attacks
-- Secrets in binary files or unknown formats
-
-Use it as one layer alongside proper secret management (vaults, env vars, short-lived tokens).
-
-## Troubleshooting
-
-Enable debug mode to see what the hook is doing:
-```bash
-export REDACT_DEBUG=1
-# Then use Claude Code normally — check stderr for hook logs
-```
-
-## Configuration
-
-Create `~/.claude-redact-ignore` or `.claude-redact-ignore` in your project to skip files:
-```
-# Skip test fixtures with fake secrets
-tests/fixtures/*
-config/example.yaml
-```
+Tell the user: This prevents Claude from **seeing** secrets in files. It does NOT prevent Claude from running arbitrary code to access secrets. Use alongside proper secret management (vaults, env vars, short-lived tokens).

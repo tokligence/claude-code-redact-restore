@@ -51,23 +51,31 @@ always has real credentials. Claude never knows the difference.
 
 ## Quick Start
 
-### Install
+### Install (one command)
 
 ```bash
-curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main/install.sh | sh
+git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
 ```
+
+Or tell Claude Code: *"Install secret redaction from https://github.com/tokligence/claude-code-redact-restore"*
 
 Restart Claude Code after installing.
 
 **Prerequisites:** Python 3.6+, `jq`
 
-**Optional (recommended):** Install the `cryptography` package for encrypted mapping storage:
+**Recommended:** Install `cryptography` for encrypted mapping storage:
 
 ```bash
 pip3 install cryptography
 ```
 
-Without it, the mapping file is stored as plaintext (still permission-restricted, but not encrypted).
+Without it, the mapping file is stored as plaintext (permission-restricted but not encrypted).
+
+### Uninstall
+
+```bash
+git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/uninstall.sh && rm -rf /tmp/claude-redact-install
+```
 
 ### Verify it works
 
