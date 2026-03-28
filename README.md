@@ -189,21 +189,49 @@ backups automatically. No manual intervention needed.
 | Generic Patterns | 3 | `api_key=...`, `password=...`, base64 secrets in env-like contexts |
 | **Total** | **108** | |
 
-## Security Model
+## Security Scope
 
-Secrets are protected by multiple layers:
+### What this tool IS
 
-- **File blocking** prevents the most dangerous files from being read at all
-- **Pattern matching** catches secrets embedded in any file
-- **HMAC-based placeholders** are deterministic (same key = same placeholder) but not reversible
-- **Fernet encryption** protects the mapping file at rest (AES-128-CBC + HMAC-SHA256)
-- **Key separation** -- the HMAC key is used for placeholders, a derived key is used for encryption
-- **File permissions** -- HMAC key is 0400 (read-only, owner only), mapping is 0600
-- **Atomic writes** -- tempfile + rename prevents corruption from crashes or concurrent access
-- **fcntl locking** -- shared locks for reads, exclusive locks for writes
+This is a **Claude Code hook** that prevents Claude from **seeing** your real secrets. When Claude reads your files, it sees `{{OPENAI_KEY_a1b2c3d4}}` instead of your actual API key. When Claude writes code, the placeholders are silently restored to real values.
 
-For a detailed explanation of the cryptographic design, threat model, and security
-guarantees, see [docs/SECURITY.md](docs/SECURITY.md).
+### What this tool protects against
+
+| Threat | Protected? | How |
+|--------|-----------|-----|
+| Claude seeing your API keys in code | Yes | Pattern-based redaction (108 patterns) |
+| Claude reading .env / credentials files | Yes | File blocking (30 file types) |
+| Claude seeing database passwords in connection strings | Yes | Pattern matching (MongoDB, PostgreSQL, MySQL, Redis URLs) |
+| Claude seeing private keys (RSA, Ed25519, etc.) | Yes | PEM header detection + file blocking |
+| Mapping file stolen from your disk | Yes | Fernet encryption at rest |
+| Same secret getting different placeholders | Yes | HMAC-based deterministic mapping |
+
+### What this tool does NOT protect against
+
+| Threat | Protected? | Why |
+|--------|-----------|-----|
+| Claude running arbitrary code to read .env | **No** | Bash regex blocking is best-effort, not bulletproof |
+| Claude using `python3 -c "open('.env').read()"` | **No** | Infinite ways to read a file programmatically |
+| Secrets printed in Bash command output | **Partial** | Redacted in known patterns, but not all output |
+| Root user reading your files | **No** | Root bypasses all file permissions |
+| Memory dump while hook is running | **No** | Secrets are briefly in RAM during redaction |
+| Prompt injection telling Claude to exfiltrate secrets | **No** | This is an application-level attack, not a file-reading attack |
+| Secrets in binary files (compiled code, images) | **No** | Binary files are skipped |
+| Secrets in formats we don't have patterns for | **No** | Only the 108 built-in + custom patterns are detected |
+
+### Bottom line
+
+> **This tool makes Claude Code safer, not bulletproof.** It prevents the most common way secrets leak (Claude reading source files with embedded credentials). It does NOT prevent a determined attacker or a compromised Claude from accessing secrets through other means. Use it as one layer in a defense-in-depth strategy, alongside proper secret management (vaults, environment variables, short-lived tokens).
+
+### Security implementation
+
+- **HMAC-based placeholders** -- deterministic, not reversible without the key
+- **Fernet encryption** -- mapping file encrypted at rest (AES-128-CBC + HMAC-SHA256)
+- **Key separation** -- HMAC key for placeholders, derived key for encryption
+- **File permissions** -- HMAC key 0400, mapping 0600
+- **Atomic writes** + **fcntl locking** -- crash-safe, parallel-safe
+
+For full cryptographic details and threat model, see [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Configuration
 
