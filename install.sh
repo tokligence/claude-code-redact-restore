@@ -127,7 +127,8 @@ if [ -f "$SETTINGS_FILE" ]; then
   else
     UPDATED=$(echo "$EXISTING" | jq \
       --argjson pre_hook "$PRE_HOOK_CONFIG" \
-      --argjson post_hook "$POST_HOOK_CONFIG" '
+      --argjson post_hook "$POST_HOOK_CONFIG" \
+      --argjson stop_hook "$SESSION_END_HOOK_CONFIG" '
       .hooks = { "PreToolUse": [$pre_hook], "PostToolUse": [$post_hook], "SessionEnd": [$stop_hook] }
     ')
   fi
@@ -136,8 +137,9 @@ if [ -f "$SETTINGS_FILE" ]; then
 else
   jq -n \
     --argjson pre_hook "$PRE_HOOK_CONFIG" \
-    --argjson post_hook "$POST_HOOK_CONFIG" '{
-    hooks: { PreToolUse: [$pre_hook], PostToolUse: [$post_hook], Stop: [$stop_hook] }
+    --argjson post_hook "$POST_HOOK_CONFIG" \
+    --argjson stop_hook "$SESSION_END_HOOK_CONFIG" '{
+    hooks: { PreToolUse: [$pre_hook], PostToolUse: [$post_hook], SessionEnd: [$stop_hook] }
   }' > "$SETTINGS_FILE"
 fi
 

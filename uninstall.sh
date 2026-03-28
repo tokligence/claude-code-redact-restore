@@ -43,7 +43,26 @@ if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
           )
       ]
     else . end
-    | if .hooks.PreToolUse == [] then del(.hooks) else . end
+    | if .hooks.PostToolUse then
+      .hooks.PostToolUse = [
+        .hooks.PostToolUse[]
+        | select(
+            (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
+          )
+      ]
+    else . end
+    | if .hooks.SessionEnd then
+      .hooks.SessionEnd = [
+        .hooks.SessionEnd[]
+        | select(
+            (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py")
+          )
+      ]
+    else . end
+    | if .hooks.PreToolUse == [] then del(.hooks.PreToolUse) else . end
+    | if .hooks.PostToolUse == [] then del(.hooks.PostToolUse) else . end
+    | if .hooks.SessionEnd == [] then del(.hooks.SessionEnd) else . end
+    | if .hooks == {} then del(.hooks) else . end
   ')
   echo "$UPDATED" | jq '.' > "$SETTINGS_FILE"
   echo "  OK: Removed hook from settings.json"

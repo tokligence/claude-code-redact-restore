@@ -33,6 +33,7 @@ import re
 import hashlib
 import tempfile
 import shutil
+import fcntl
 
 # ── Load patterns ────────────────────────────────────────────────────────
 # Import from patterns.py in the same directory, or fall back to inline
@@ -105,396 +106,424 @@ try:
 except (json.JSONDecodeError, EOFError):
     sys.exit(0)
 
-tool_name = input_data.get("tool_name", "")
-tool_input = input_data.get("tool_input", {})
-session_id = input_data.get("session_id", "default")
-is_post_hook = "tool_result" in input_data
+if not isinstance(input_data, dict):
+    sys.exit(0)
 
-MAPPING_FILE = f"/tmp/.claude-redact-{session_id}.json"
-BACKUP_DIR = os.path.join(tempfile.gettempdir(), f".claude-backup-{session_id}")
+try:
+    tool_name = input_data.get("tool_name", "")
+    tool_input = input_data.get("tool_input", {})
+    session_id = input_data.get("session_id", "default")
+    is_post_hook = "tool_result" in input_data
 
-
-# ── Backup management ───────────────────────────────────────────────────
-def backup_path_for(file_path):
-    """Get the backup file path prefix for a given original file."""
-    path_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
-    return os.path.join(BACKUP_DIR, path_hash)
+    MAPPING_FILE = f"/tmp/.claude-redact-{session_id}.json"
+    BACKUP_DIR = os.path.join(tempfile.gettempdir(), f".claude-backup-{session_id}")
 
 
-def restore_pending_backups():
-    """Restore any pending backups from a previous crash."""
-    if not os.path.isdir(BACKUP_DIR):
-        return
-    for entry in os.listdir(BACKUP_DIR):
-        if not entry.endswith(".meta"):
-            continue
-        meta_path = os.path.join(BACKUP_DIR, entry)
-        try:
-            with open(meta_path) as f:
-                meta = json.load(f)
-            original_path = meta["original_path"]
-            bak_path = os.path.join(BACKUP_DIR, entry[:-5] + ".bak")
-            if os.path.exists(bak_path) and os.path.isfile(original_path):
-                shutil.copy2(bak_path, original_path)
-            for p in (meta_path, bak_path):
-                if os.path.exists(p):
-                    os.remove(p)
-        except (json.JSONDecodeError, OSError, KeyError):
-            try:
-                os.remove(meta_path)
-            except OSError:
-                pass
+    # ── Backup management ───────────────────────────────────────────────────
+    def backup_path_for(file_path):
+        """Get the backup file path prefix for a given original file."""
+        path_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
+        return os.path.join(BACKUP_DIR, path_hash)
 
 
-# Restore pending backups on startup (crash recovery).
-# Only for PreToolUse — PostToolUse means the tool completed normally,
-# so backups from this cycle should be handled by the PostToolUse handler.
-if not is_post_hook:
-    restore_pending_backups()
-
-
-# ── Mapping management ───────────────────────────────────────────────────
-def load_mapping():
-    """Load the session mapping file. Returns empty mapping on any error."""
-    try:
-        if os.path.exists(MAPPING_FILE):
-            with open(MAPPING_FILE) as f:
-                return json.load(f)
-    except (json.JSONDecodeError, OSError, PermissionError):
-        pass
-    return {"secret_to_placeholder": {}, "placeholder_to_secret": {}, "counters": {}}
-
-
-def save_mapping(mapping):
-    """Persist the mapping file with restricted permissions."""
-    try:
-        fd = os.open(MAPPING_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(mapping, f)
-    except OSError:
-        pass
-
-
-def get_placeholder(mapping, secret_value, pattern_name):
-    """Get or create a consistent placeholder for a secret value."""
-    if secret_value in mapping["secret_to_placeholder"]:
-        return mapping["secret_to_placeholder"][secret_value]
-
-    counter = mapping["counters"].get(pattern_name, 0) + 1
-    mapping["counters"][pattern_name] = counter
-    placeholder = "{{" + f"{pattern_name}_{counter}" + "}}"
-
-    mapping["secret_to_placeholder"][secret_value] = placeholder
-    mapping["placeholder_to_secret"][placeholder] = secret_value
-    return placeholder
-
-
-# ── Redact / Restore ─────────────────────────────────────────────────────
-def redact_content(content, mapping):
-    """Scan content for secrets and replace with placeholders.
-
-    Returns (redacted_content, found_any_secrets).
-    The mapping is mutated in place and must be saved by the caller.
-    """
-    redacted = content
-    found_any = False
-
-    for pattern_name, compiled in COMPILED_PATTERNS:
-        for match in compiled.finditer(redacted):
-            matched_value = match.group(0)
-            if len(matched_value) < 8:
+    def restore_pending_backups():
+        """Restore any pending backups from a previous crash."""
+        if not os.path.isdir(BACKUP_DIR):
+            return
+        for entry in os.listdir(BACKUP_DIR):
+            if not entry.endswith(".meta"):
                 continue
-            placeholder = get_placeholder(mapping, matched_value, pattern_name)
-            redacted = redacted.replace(matched_value, placeholder)
-            found_any = True
+            meta_path = os.path.join(BACKUP_DIR, entry)
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+                original_path = meta["original_path"]
+                bak_path = os.path.join(BACKUP_DIR, entry[:-5] + ".bak")
+                if os.path.exists(bak_path) and os.path.isfile(original_path):
+                    shutil.copy2(bak_path, original_path)
+                for p in (meta_path, bak_path):
+                    if os.path.exists(p):
+                        os.remove(p)
+            except (json.JSONDecodeError, OSError, KeyError):
+                try:
+                    os.remove(meta_path)
+                except OSError:
+                    pass
 
-    return redacted, found_any
+
+    # Restore pending backups on startup (crash recovery).
+    # Only for PreToolUse — PostToolUse means the tool completed normally,
+    # so backups from this cycle should be handled by the PostToolUse handler.
+    if not is_post_hook:
+        restore_pending_backups()
 
 
-def restore_content(content, mapping):
-    """Replace placeholders back to real secret values."""
-    restored = content
-    for placeholder, secret in mapping.get("placeholder_to_secret", {}).items():
-        restored = restored.replace(placeholder, secret)
-    return restored
+    # ── Mapping management ───────────────────────────────────────────────────
+    def load_mapping():
+        """Load the session mapping file. Returns empty mapping on any error."""
+        try:
+            if os.path.exists(MAPPING_FILE):
+                with open(MAPPING_FILE, 'r') as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                    data = json.load(f)
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                    return data
+        except (json.JSONDecodeError, OSError, PermissionError):
+            pass
+        return {"secret_to_placeholder": {}, "placeholder_to_secret": {}, "counters": {}}
 
 
-def backup_and_redact_file(file_path, mapping):
-    """Backup original file and overwrite with redacted content.
+    def save_mapping(mapping):
+        """Persist the mapping file with restricted permissions."""
+        try:
+            fd = os.open(MAPPING_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                json.dump(mapping, f)
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
 
-    Used by Read, Write, and Edit PreToolUse handlers so Claude Code's
-    freshness check sees the same content it recorded during Read.
 
-    Returns True if the file was redacted, False otherwise.
-    """
-    try:
-        with open(file_path, "rb") as f:
-            raw_bytes = f.read()
-        raw_content = raw_bytes.decode("utf-8", errors="replace")
-    except (OSError, PermissionError):
-        return False
+    def get_placeholder(mapping, secret_value, pattern_name):
+        """Get or create a consistent placeholder for a secret value."""
+        if secret_value in mapping["secret_to_placeholder"]:
+            return mapping["secret_to_placeholder"][secret_value]
 
-    redacted, found = redact_content(raw_content, mapping)
-    if not found:
-        return False
+        counter = mapping["counters"].get(pattern_name, 0) + 1
+        mapping["counters"][pattern_name] = counter
+        placeholder = "{{" + f"{pattern_name}_{counter}" + "}}"
 
-    save_mapping(mapping)
-    os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
-    bp = backup_path_for(file_path)
+        mapping["secret_to_placeholder"][secret_value] = placeholder
+        mapping["placeholder_to_secret"][placeholder] = secret_value
+        return placeholder
 
-    try:
-        fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw_bytes)
-        with open(bp + ".meta", "w") as f:
-            json.dump({"original_path": file_path}, f)
 
-        stat = os.stat(file_path)
-        with open(file_path, "w") as f:
-            f.write(redacted)
-        os.utime(file_path, (stat.st_atime, stat.st_mtime))
-        return True
-    except (OSError, PermissionError):
+    # ── Redact / Restore ─────────────────────────────────────────────────────
+    def redact_content(content, mapping):
+        """Scan content for secrets and replace with placeholders.
+
+        Returns (redacted_content, found_any_secrets).
+        The mapping is mutated in place and must be saved by the caller.
+        """
+        # Collect all matches with their positions first
+        matches = []
+        for pattern_name, compiled in COMPILED_PATTERNS:
+            for m in compiled.finditer(content):
+                matched_value = m.group(0)
+                if len(matched_value) < 8:
+                    continue
+                placeholder = get_placeholder(mapping, matched_value, pattern_name)
+                matches.append((m.start(), m.end(), matched_value, placeholder))
+
+        if not matches:
+            return content, False
+
+        # Sort by start position descending (replace from end to avoid position shifting)
+        matches.sort(key=lambda x: x[0], reverse=True)
+
+        # Deduplicate overlapping matches and replace from end to start
+        result = content
+        used_ranges = []
+        for start, end, secret, placeholder in matches:
+            if any(start < ue and end > us for us, ue in used_ranges):
+                continue  # Skip overlapping
+            result = result[:start] + placeholder + result[end:]
+            used_ranges.append((start, end))
+
+        return result, True
+
+
+    def restore_content(content, mapping):
+        """Replace placeholders back to real secret values."""
+        restored = content
+        for placeholder, secret in mapping.get("placeholder_to_secret", {}).items():
+            restored = restored.replace(placeholder, secret)
+        return restored
+
+
+    def backup_and_redact_file(file_path, mapping):
+        """Backup original file and overwrite with redacted content.
+
+        Used by Read, Write, and Edit PreToolUse handlers so Claude Code's
+        freshness check sees the same content it recorded during Read.
+
+        Returns True if the file was redacted, False otherwise.
+        """
+        try:
+            with open(file_path, "rb") as f:
+                raw_bytes = f.read()
+            raw_content = raw_bytes.decode("utf-8", errors="replace")
+        except (OSError, PermissionError):
+            return False
+
+        redacted, found = redact_content(raw_content, mapping)
+        if not found:
+            return False
+
+        save_mapping(mapping)
+        os.makedirs(BACKUP_DIR, mode=0o700, exist_ok=True)
+        bp = backup_path_for(file_path)
+
+        try:
+            fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(raw_bytes)
+            with open(bp + ".meta", "w") as f:
+                json.dump({"original_path": file_path}, f)
+
+            stat = os.stat(file_path)
+            saved_mode = stat.st_mode
+            with open(file_path, "w") as f:
+                f.write(redacted)
+            os.chmod(file_path, saved_mode)
+            os.utime(file_path, (stat.st_atime, stat.st_mtime))
+            return True
+        except (OSError, PermissionError):
+            for suffix in (".bak", ".meta"):
+                try:
+                    os.remove(bp + suffix)
+                except OSError:
+                    pass
+            return False
+
+
+    def cleanup_backup(file_path):
+        """Delete backup files without restoring."""
+        bp = backup_path_for(file_path)
         for suffix in (".bak", ".meta"):
             try:
                 os.remove(bp + suffix)
             except OSError:
                 pass
-        return False
 
 
-def cleanup_backup(file_path):
-    """Delete backup files without restoring."""
-    bp = backup_path_for(file_path)
-    for suffix in (".bak", ".meta"):
-        try:
-            os.remove(bp + suffix)
-        except OSError:
-            pass
-
-
-# ── Strategy 1: Check block list ─────────────────────────────────────────
-def is_blocked_file(file_path):
-    """Check if a file path matches any blocked pattern."""
-    if not file_path:
+    # ── Strategy 1: Check block list ─────────────────────────────────────────
+    def is_blocked_file(file_path):
+        """Check if a file path matches any blocked pattern."""
+        if not file_path:
+            return False, ""
+        basename = os.path.basename(file_path)
+        for pattern in BLOCKED_FILES:
+            if basename == pattern or file_path.endswith(pattern) or f"/{pattern}" in file_path:
+                return True, pattern
         return False, ""
-    basename = os.path.basename(file_path)
-    for pattern in BLOCKED_FILES:
-        if basename == pattern or file_path.endswith(pattern) or f"/{pattern}" in file_path:
-            return True, pattern
-    return False, ""
 
 
-# ── Output helpers ───────────────────────────────────────────────────────
-def deny(reason):
-    """Output a deny decision and exit."""
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason
-        }
-    }))
-    sys.exit(0)
+    # ── Output helpers ───────────────────────────────────────────────────────
+    def deny(reason):
+        """Output a deny decision and exit."""
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason
+            }
+        }))
+        sys.exit(0)
 
 
-def allow_with_update(updated_input):
-    """Output an allow decision with modified input and exit."""
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-            "updatedInput": updated_input
-        }
-    }))
-    sys.exit(0)
+    def allow_with_update(updated_input):
+        """Output an allow decision with modified input and exit."""
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "updatedInput": updated_input
+            }
+        }))
+        sys.exit(0)
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# PostToolUse: Restore/cleanup file backups after tool completes
-# ══════════════════════════════════════════════════════════════════════════
-if is_post_hook:
-    file_path = tool_input.get("file_path", "")
-    if file_path and tool_name in ("Read", "Write", "Edit"):
-        bp = backup_path_for(file_path)
-        bak_file = bp + ".bak"
-        if os.path.exists(bak_file):
-            if tool_name == "Read":
-                # Restore original content after Read
-                try:
-                    shutil.copy2(bak_file, file_path)
-                except OSError:
-                    pass
-            elif tool_name == "Edit":
-                # After Edit: file has edited content with placeholders.
-                # Replace all placeholders with real values.
-                mapping = load_mapping()
-                if mapping.get("placeholder_to_secret"):
+    # ══════════════════════════════════════════════════════════════════════════
+    # PostToolUse: Restore/cleanup file backups after tool completes
+    # ══════════════════════════════════════════════════════════════════════════
+    if is_post_hook:
+        file_path = tool_input.get("file_path", "")
+        if file_path and tool_name in ("Read", "Write", "Edit"):
+            bp = backup_path_for(file_path)
+            bak_file = bp + ".bak"
+            if os.path.exists(bak_file):
+                if tool_name == "Read":
+                    # Restore original content after Read
                     try:
-                        with open(file_path, "r", errors="replace") as f:
-                            edited = f.read()
-                        restored = restore_content(edited, mapping)
-                        if restored != edited:
-                            with open(file_path, "w") as f:
-                                f.write(restored)
+                        shutil.copy2(bak_file, file_path)
                     except OSError:
-                        # Fall back to restoring from backup
+                        pass
+                elif tool_name == "Edit":
+                    # After Edit: file has edited content with placeholders.
+                    # Replace all placeholders with real values.
+                    mapping = load_mapping()
+                    if mapping.get("placeholder_to_secret"):
                         try:
-                            shutil.copy2(bak_file, file_path)
+                            with open(file_path, "r", errors="replace") as f:
+                                edited = f.read()
+                            restored = restore_content(edited, mapping)
+                            if restored != edited:
+                                with open(file_path, "w") as f:
+                                    f.write(restored)
                         except OSError:
-                            pass
-            # For Write: file already has correct content (placeholders
-            # were restored in PreToolUse). Just clean up backup.
-            cleanup_backup(file_path)
-    sys.exit(0)
+                            # Fall back to restoring from backup
+                            try:
+                                shutil.copy2(bak_file, file_path)
+                            except OSError:
+                                pass
+                # For Write: file already has correct content (placeholders
+                # were restored in PreToolUse). Just clean up backup.
+                cleanup_backup(file_path)
+        sys.exit(0)
 
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# SessionEnd / Stop hook: Clean up sensitive mapping and backup files
-# ══════════════════════════════════════════════════════════════════════════
-if input_data.get("type") in ("SessionEnd", "Stop") or tool_name in ("SessionEnd", "Stop"):
-    # Remove the mapping file (contains real secret values)
-    try:
-        if os.path.exists(MAPPING_FILE):
-            os.remove(MAPPING_FILE)
-    except OSError:
-        pass
-    # Remove any leftover backup files
-    if os.path.isdir(BACKUP_DIR):
+    # ══════════════════════════════════════════════════════════════════════════
+    # SessionEnd / Stop hook: Clean up sensitive mapping and backup files
+    # ══════════════════════════════════════════════════════════════════════════
+    if input_data.get("type") in ("SessionEnd", "Stop") or tool_name in ("SessionEnd", "Stop"):
+        # Remove the mapping file (contains real secret values)
         try:
-            shutil.rmtree(BACKUP_DIR)
+            if os.path.exists(MAPPING_FILE):
+                os.remove(MAPPING_FILE)
         except OSError:
             pass
-    sys.exit(0)
+        # Remove any leftover backup files
+        if os.path.isdir(BACKUP_DIR):
+            try:
+                shutil.rmtree(BACKUP_DIR)
+            except OSError:
+                pass
+        sys.exit(0)
 
-# ══════════════════════════════════════════════════════════════════════════
-# PreToolUse handlers below
-# ══════════════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
+    # PreToolUse handlers below
+    # ══════════════════════════════════════════════════════════════════════════
 
-# ── Handle Read tool ─────────────────────────────────────────────────────
-if tool_name == "Read":
-    file_path = tool_input.get("file_path", "")
+    # ── Handle Read tool ─────────────────────────────────────────────────────
+    if tool_name == "Read":
+        file_path = tool_input.get("file_path", "")
 
-    # Strategy 1: Block list
-    blocked, matched_pattern = is_blocked_file(file_path)
-    if blocked:
-        deny(
-            f"BLOCKED: '{os.path.basename(file_path)}' is in the secret files block list "
-            f"(matched '{matched_pattern}'). Use .env.example or ask the user for guidance."
-        )
+        # Strategy 1: Block list
+        blocked, matched_pattern = is_blocked_file(file_path)
+        if blocked:
+            deny(
+                f"BLOCKED: '{os.path.basename(file_path)}' is in the secret files block list "
+                f"(matched '{matched_pattern}'). Use .env.example or ask the user for guidance."
+            )
 
-    # Strategy 2: Backup original, overwrite with redacted content, allow Read.
-    # PostToolUse restores the original after Read completes.
-    if file_path and os.path.isfile(file_path):
+        # Strategy 2: Backup original, overwrite with redacted content, allow Read.
+        # PostToolUse restores the original after Read completes.
+        if file_path and os.path.isfile(file_path):
+            mapping = load_mapping()
+            if backup_and_redact_file(file_path, mapping):
+                sys.exit(0)
+            # backup_and_redact_file failed (e.g. read-only) — try deny fallback
+            try:
+                with open(file_path, "r", errors="replace") as f:
+                    raw_content = f.read()
+                redacted, found = redact_content(raw_content, mapping)
+                if found:
+                    save_mapping(mapping)
+                    deny(
+                        f"This file contains secrets that have been redacted for safety. "
+                        f"Here is the redacted content of {file_path}:\n\n"
+                        f"{redacted}\n\n"
+                        f"(Placeholders like {{{{OPENAI_KEY_1}}}} represent real secret values. "
+                        f"Use them as-is in code — they will be automatically restored when you write files.)"
+                    )
+            except (OSError, PermissionError):
+                pass
+
+        # No secrets found — allow normal read
+        sys.exit(0)
+
+
+    # ── Handle Write tool ────────────────────────────────────────────────────
+    if tool_name == "Write":
         mapping = load_mapping()
-        if backup_and_redact_file(file_path, mapping):
-            sys.exit(0)
-        # backup_and_redact_file failed (e.g. read-only) — try deny fallback
-        try:
-            with open(file_path, "r", errors="replace") as f:
-                raw_content = f.read()
-            redacted, found = redact_content(raw_content, mapping)
-            if found:
-                save_mapping(mapping)
-                deny(
-                    f"This file contains secrets that have been redacted for safety. "
-                    f"Here is the redacted content of {file_path}:\n\n"
-                    f"{redacted}\n\n"
-                    f"(Placeholders like {{{{OPENAI_KEY_1}}}} represent real secret values. "
-                    f"Use them as-is in code — they will be automatically restored when you write files.)"
-                )
-        except (OSError, PermissionError):
-            pass
-
-    # No secrets found — allow normal read
-    sys.exit(0)
-
-
-# ── Handle Write tool ────────────────────────────────────────────────────
-if tool_name == "Write":
-    mapping = load_mapping()
-    if not mapping.get("placeholder_to_secret"):
-        sys.exit(0)
-
-    file_path = tool_input.get("file_path", "")
-    write_content = tool_input.get("content", "")
-
-    # Re-redact the file so Claude Code's freshness check passes.
-    # PostToolUse will clean up the backup after Write completes.
-    if file_path and os.path.isfile(file_path):
-        backup_and_redact_file(file_path, mapping)
-
-    # Restore placeholders in the content being written
-    restored = restore_content(write_content, mapping)
-    if restored != write_content:
-        allow_with_update({
-            "file_path": file_path,
-            "content": restored
-        })
-    sys.exit(0)
-
-
-# ── Handle Edit tool ─────────────────────────────────────────────────────
-if tool_name == "Edit":
-    mapping = load_mapping()
-    if not mapping.get("placeholder_to_secret"):
-        sys.exit(0)
-
-    file_path = tool_input.get("file_path", "")
-
-    # Re-redact the file so Claude Code's freshness check passes and
-    # old_string (which contains placeholders) matches the file content.
-    # PostToolUse will restore all placeholders in the edited file.
-    if file_path and os.path.isfile(file_path):
-        if backup_and_redact_file(file_path, mapping):
-            # File is now redacted — old_string/new_string should already
-            # contain placeholders that match. Don't restore them.
+        if not mapping.get("placeholder_to_secret"):
             sys.exit(0)
 
-    # Fallback (file doesn't exist, no secrets, or backup failed):
-    # restore placeholders in old_string/new_string so they match the
-    # file on disk (which has real values).
-    old_string = tool_input.get("old_string", "")
-    new_string = tool_input.get("new_string", "")
-    restored_old = restore_content(old_string, mapping)
-    restored_new = restore_content(new_string, mapping)
+        file_path = tool_input.get("file_path", "")
+        write_content = tool_input.get("content", "")
 
-    if restored_old != old_string or restored_new != new_string:
-        updated = dict(tool_input)
-        updated["old_string"] = restored_old
-        updated["new_string"] = restored_new
-        allow_with_update(updated)
+        # Re-redact the file so Claude Code's freshness check passes.
+        # PostToolUse will clean up the backup after Write completes.
+        if file_path and os.path.isfile(file_path):
+            backup_and_redact_file(file_path, mapping)
 
-    sys.exit(0)
+        # Restore placeholders in the content being written
+        restored = restore_content(write_content, mapping)
+        if restored != write_content:
+            allow_with_update({
+                "file_path": file_path,
+                "content": restored
+            })
+        sys.exit(0)
 
 
-# ── Handle Bash tool ─────────────────────────────────────────────────────
-if tool_name == "Bash":
-    command = tool_input.get("command", "")
+    # ── Handle Edit tool ─────────────────────────────────────────────────────
+    if tool_name == "Edit":
+        mapping = load_mapping()
+        if not mapping.get("placeholder_to_secret"):
+            sys.exit(0)
 
-    # Strategy 1: Block commands that cat/read blocked files
-    for pattern in BLOCKED_FILES:
-        escaped = re.escape(pattern)
-        if re.search(
-            rf"(cat|head|tail|less|more|bat|source|\.)\s+[^\s|;]*{escaped}",
-            command
-        ):
-            deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
-        if re.search(rf"<\s*[^\s]*{escaped}", command):
-            deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
+        file_path = tool_input.get("file_path", "")
 
-    # Strategy 3: Restore placeholders in bash commands
-    mapping = load_mapping()
-    if mapping.get("placeholder_to_secret"):
-        restored = restore_content(command, mapping)
-        if restored != command:
+        # Re-redact the file so Claude Code's freshness check passes and
+        # old_string (which contains placeholders) matches the file content.
+        # PostToolUse will restore all placeholders in the edited file.
+        if file_path and os.path.isfile(file_path):
+            if backup_and_redact_file(file_path, mapping):
+                # File is now redacted — old_string/new_string should already
+                # contain placeholders that match. Don't restore them.
+                sys.exit(0)
+
+        # Fallback (file doesn't exist, no secrets, or backup failed):
+        # restore placeholders in old_string/new_string so they match the
+        # file on disk (which has real values).
+        old_string = tool_input.get("old_string", "")
+        new_string = tool_input.get("new_string", "")
+        restored_old = restore_content(old_string, mapping)
+        restored_new = restore_content(new_string, mapping)
+
+        if restored_old != old_string or restored_new != new_string:
             updated = dict(tool_input)
-            updated["command"] = restored
+            updated["old_string"] = restored_old
+            updated["new_string"] = restored_new
             allow_with_update(updated)
 
+        sys.exit(0)
+
+
+    # ── Handle Bash tool ─────────────────────────────────────────────────────
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+
+        # Strategy 1: Block commands that cat/read blocked files
+        for pattern in BLOCKED_FILES:
+            escaped = re.escape(pattern)
+            if re.search(
+                rf"(cat|head|tail|less|more|bat|source|\.)\s+[^\s|;]*{escaped}",
+                command
+            ):
+                deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
+            if re.search(rf"<\s*[^\s]*{escaped}", command):
+                deny(f"BLOCKED: command reads '{pattern}' which is in the secret files block list.")
+
+        # Strategy 3: Restore placeholders in bash commands
+        mapping = load_mapping()
+        if mapping.get("placeholder_to_secret"):
+            restored = restore_content(command, mapping)
+            if restored != command:
+                updated = dict(tool_input)
+                updated["command"] = restored
+                allow_with_update(updated)
+
+        sys.exit(0)
+
+
+    # ── Allow everything else ────────────────────────────────────────────────
     sys.exit(0)
 
-
-# ── Allow everything else ────────────────────────────────────────────────
-sys.exit(0)
+except Exception as e:
+    print(f"redact-restore hook error: {e}", file=sys.stderr)
+    sys.exit(0)  # Fail open — don't block tool execution
