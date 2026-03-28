@@ -224,6 +224,7 @@ PATTERN_TEST_CASES = [
     ("FTP_URL", "ftp://uploader:fakepassword123@ftp.example.com:21/data/"),
     ("LDAP_URL", "ldaps://admin:fakepassword123@ldap.corp.example.com:636"),
     ("HTTP_BASIC_AUTH_URL", "http://elastic:fakepassword123@es.internal:9200"),
+    ("EMAIL_IN_CONFIG", "EMAIL=admin@company.example.com"),
     ("PLANETSCALE_PASSWORD", "pscale_pw_" + "A" * 43),
     ("PLANETSCALE_TOKEN", "pscale_tkn_" + "A" * 43),
     ("PLANETSCALE_OAUTH", "pscale_oauth_" + "A" * 43),

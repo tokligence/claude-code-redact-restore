@@ -399,6 +399,13 @@ SECRET_PATTERNS = [
     ("JWT_TOKEN", r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'),
 
     # ================================================================
+    # PII / PERSONAL DATA
+    # ================================================================
+
+    # Email addresses in config/env assignment context (not in comments, docs, git, mailto)
+    ("EMAIL_IN_CONFIG", r'(?i)(?<![a-z])(?:e?mail(?:_(?:user(?:name)?|from|to|address|sender|recipient|account))|smtp_?(?:user(?:name)?|from|sender)|(?:from|to|contact|user|admin|notify|reply)_e?mail|sendgrid_(?:from|to|sender)|mail_(?:from|user(?:name)?|sender|address)|email)["\'\']?\s*[:=]\s*["\'\']?[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}["\'\']?'),
+
+    # ================================================================
     # GENERIC PATTERNS (lower priority — listed last)
     # ================================================================
 
