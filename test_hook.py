@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Comprehensive E2E tests for claude-code-redact-restore hooks.
+Comprehensive E2E tests for claude-secret-shield hooks.
 
 Runs the actual hook script via subprocess, validating:
 - Redaction correctness (overlapping patterns, unicode, binary, empty)

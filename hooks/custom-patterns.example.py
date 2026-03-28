@@ -1,4 +1,4 @@
-# Custom secret patterns for claude-code-redact-restore
+# Custom secret patterns for claude-secret-shield
 # Copy this file to ~/.claude/hooks/custom-patterns.py and add your patterns.
 # This file is NEVER overwritten by install.sh upgrades.
 

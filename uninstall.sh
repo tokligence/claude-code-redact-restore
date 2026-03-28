@@ -1,6 +1,6 @@
 #!/bin/sh
-# Uninstall claude-code-redact-restore
-# Usage: curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main/uninstall.sh | sh
+# Uninstall claude-secret-shield
+# Usage: curl -sL https://raw.githubusercontent.com/tokligence/claude-secret-shield/main/uninstall.sh | sh
 
 set -e
 
@@ -8,7 +8,7 @@ HOOKS_DIR="$HOME/.claude/hooks"
 SETTINGS_FILE="$HOME/.claude/settings.json"
 
 echo ""
-echo "  Uninstalling claude-code-redact-restore..."
+echo "  Uninstalling claude-secret-shield..."
 echo ""
 
 # Remove hook files

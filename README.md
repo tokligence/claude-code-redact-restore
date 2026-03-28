@@ -1,4 +1,6 @@
-# Claude Code Redact & Restore
+[English](README.md) | [中文](README.zh-CN.md)
+
+# Claude Secret Shield
 
 > Protect your secrets when using Claude Code. Automatic detection, redaction, and restoration of API keys, tokens, passwords, and credentials.
 
@@ -54,10 +56,10 @@ always has real credentials. Claude never knows the difference.
 ### Install (one command)
 
 ```bash
-git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
+git clone https://github.com/tokligence/claude-secret-shield.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
 ```
 
-Or tell Claude Code: *"Install secret redaction from https://github.com/tokligence/claude-code-redact-restore"*
+Or tell Claude Code: *"Install secret redaction from https://github.com/tokligence/claude-secret-shield"*
 
 Restart Claude Code after installing.
 
@@ -74,7 +76,7 @@ Without it, the mapping file is stored as plaintext (permission-restricted but n
 ### Uninstall
 
 ```bash
-git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/uninstall.sh && rm -rf /tmp/claude-redact-install
+git clone https://github.com/tokligence/claude-secret-shield.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/uninstall.sh && rm -rf /tmp/claude-redact-install
 ```
 
 ### Verify it works
@@ -86,12 +88,6 @@ git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/clau
 2. In Claude Code, ask: "Read /tmp/test-secret.txt"
 3. Claude should see something like: `OPENAI_API_KEY={{OPENAI_KEY_a1b2c3d4}}`
 4. The real file on disk is unchanged (check with `cat /tmp/test-secret.txt`)
-
-### Uninstall
-
-```bash
-curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main/uninstall.sh | sh
-```
 
 ## Architecture
 

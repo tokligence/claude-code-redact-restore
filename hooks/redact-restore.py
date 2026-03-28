@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude Code Secret Redact/Restore Hook
+Claude Secret Shield — Protect your secrets from Claude Code
 
 Strategy 1: Block list — certain files are never read (.env, credentials, etc.)
 Strategy 2: Pattern-based redact — secrets in ANY file are replaced with consistent placeholders

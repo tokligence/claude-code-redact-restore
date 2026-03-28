@@ -1,6 +1,6 @@
 #!/bin/sh
-# claude-code-redact-restore — One-line installer
-# Usage: curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main/install.sh | sh
+# claude-secret-shield — One-line installer
+# Usage: curl -sL https://raw.githubusercontent.com/tokligence/claude-secret-shield/main/install.sh | sh
 #
 # What this does:
 #   1. Installs the redact-restore hook (Python) to ~/.claude/hooks/
@@ -12,10 +12,10 @@ set -e
 
 HOOKS_DIR="$HOME/.claude/hooks"
 SETTINGS_FILE="$HOME/.claude/settings.json"
-BASE_URL="https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main"
+BASE_URL="https://raw.githubusercontent.com/tokligence/claude-secret-shield/main"
 
 echo ""
-echo "  claude-code-redact-restore"
+echo "  claude-secret-shield"
 echo "  ----------------------------"
 echo "  Prevents Claude Code from seeing your secrets."
 echo "  Secrets are replaced with placeholders and restored on write."

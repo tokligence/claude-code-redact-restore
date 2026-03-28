@@ -1,6 +1,6 @@
 # Security Guide -- How Your Secrets Are Protected
 
-This document explains how claude-code-redact-restore protects your secrets.
+This document explains how claude-secret-shield protects your secrets.
 It is written for developers who are not cryptographers. No prior knowledge of
 cryptography is assumed.
 
@@ -374,7 +374,7 @@ The mapping file on disk is encrypted. The key exists only on your machine.
 
 ## Comparison with Alternatives
 
-| Feature | claude-code-redact-restore | .gitignore | .env vault (Doppler, etc.) | Manual review |
+| Feature | claude-secret-shield | .gitignore | .env vault (Doppler, etc.) | Manual review |
 |---------|---------------------------|-----------|---------------------------|---------------|
 | Automatic | Yes | No | Partial | No |
 | Works with Claude Code | Yes | No (Claude still reads) | No | Yes (tedious) |

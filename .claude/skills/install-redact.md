@@ -13,7 +13,7 @@ The user wants to install secret redaction hooks for Claude Code. This protects 
 Run this single command:
 
 ```bash
-git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
+git clone https://github.com/tokligence/claude-secret-shield.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/install.sh && rm -rf /tmp/claude-redact-install
 ```
 
 This will:
@@ -46,7 +46,7 @@ The user must restart Claude Code (or start a new session) for hooks to take eff
 ## To uninstall later
 
 ```bash
-git clone https://github.com/tokligence/claude-code-redact-restore.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/uninstall.sh && rm -rf /tmp/claude-redact-install
+git clone https://github.com/tokligence/claude-secret-shield.git /tmp/claude-redact-install && bash /tmp/claude-redact-install/uninstall.sh && rm -rf /tmp/claude-redact-install
 ```
 
 ## Important security note

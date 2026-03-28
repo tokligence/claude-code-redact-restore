@@ -1,5 +1,5 @@
 """
-Secret patterns for claude-code-redact-restore
+Secret patterns for claude-secret-shield
 
 Users can customize by editing this file or adding patterns to:
   ~/.claude/hooks/redact-patterns.py

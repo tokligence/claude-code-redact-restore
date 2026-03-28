@@ -1,11 +1,11 @@
 #!/bin/bash
-# claude-code-redact-restore — Prevent Claude Code from reading secret files
-# https://github.com/tokligence/claude-code-redact-restore
+# claude-secret-shield — Prevent Claude Code from reading secret files
+# https://github.com/tokligence/claude-secret-shield
 #
 # Intercepts Read and Bash tool calls. Blocks access to files matching
 # secret patterns (.env, credentials, private keys, etc.).
 #
-# Install: curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore/main/install.sh | sh
+# Install: curl -sL https://raw.githubusercontent.com/tokligence/claude-secret-shield/main/install.sh | sh
 
 set -euo pipefail
 
