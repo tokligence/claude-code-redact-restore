@@ -592,6 +592,14 @@ try:
     # ══════════════════════════════════════════════════════════════════════════
     if is_post_hook:
         file_path = tool_input.get("file_path", "")
+
+        # Auto-delete .tmp_secrets.conf after any tool reads it
+        if tool_name == "Read" and file_path and os.path.basename(file_path) == ".tmp_secrets.conf":
+            # Schedule deletion after restore completes (see below)
+            _delete_tmp_secrets = file_path
+        else:
+            _delete_tmp_secrets = None
+
         if file_path and tool_name in ("Read", "Write", "Edit"):
             bp = backup_path_for(file_path)
             bak_file = bp + ".bak"
@@ -640,14 +648,15 @@ try:
                 # were restored in PreToolUse). Just clean up backup.
                 cleanup_backup(file_path)
 
-            # Auto-delete .tmp_secrets.conf after reading (ephemeral file)
-            if tool_name == "Read" and os.path.basename(file_path) == ".tmp_secrets.conf":
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                        debug_log(f"Auto-deleted {file_path} after read")
-                except OSError:
-                    pass
+        # Auto-delete .tmp_secrets.conf after restore is complete
+        if _delete_tmp_secrets:
+            try:
+                if os.path.exists(_delete_tmp_secrets):
+                    os.remove(_delete_tmp_secrets)
+                    debug_log(f"Auto-deleted {_delete_tmp_secrets} after read")
+            except OSError:
+                pass
+
         sys.exit(0)
 
 
