@@ -12,7 +12,7 @@ echo "  Uninstalling claude-secret-shield..."
 echo ""
 
 # Remove hook files
-for f in redact-restore.py patterns.py redact-secrets.sh custom-patterns.example.py; do
+for f in redact-restore.py patterns.py redact-secrets.sh custom-patterns.example.py statusline.sh; do
   if [ -f "$HOOKS_DIR/$f" ]; then
     rm "$HOOKS_DIR/$f"
     echo "  OK: Removed $HOOKS_DIR/$f"
@@ -70,6 +70,7 @@ if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
     | if .hooks.SessionEnd == [] then del(.hooks.SessionEnd) else . end
     | if .hooks.UserPromptSubmit == [] then del(.hooks.UserPromptSubmit) else . end
     | if .hooks == {} then del(.hooks) else . end
+    | del(.statusLine)
   ')
   echo "$UPDATED" | jq '.' > "$SETTINGS_FILE"
   echo "  OK: Removed hook from settings.json"

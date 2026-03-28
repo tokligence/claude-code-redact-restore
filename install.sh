@@ -52,6 +52,12 @@ echo "  -> Downloading custom-patterns example..."
 curl -fsSL "$BASE_URL/hooks/custom-patterns.example.py" -o "$HOOKS_DIR/custom-patterns.example.py"
 echo "  OK: Installed $HOOKS_DIR/custom-patterns.example.py"
 
+# Install status line script
+echo "  -> Downloading status line..."
+curl -fsSL "$BASE_URL/hooks/statusline.sh" -o "$HOOKS_DIR/statusline.sh"
+chmod +x "$HOOKS_DIR/statusline.sh"
+echo "  OK: Installed $HOOKS_DIR/statusline.sh"
+
 if [ -f "$HOOKS_DIR/custom-patterns.py" ]; then
   echo "  OK: Existing custom-patterns.py preserved (not overwritten)"
 fi
@@ -109,6 +115,8 @@ if [ -f "$SETTINGS_FILE" ]; then
             (.command != "python3 ~/.claude/hooks/redact-restore.py")
           ))
       ) + [$prompt_hook]
+      |
+      .statusLine = {"type": "command", "command": "~/.claude/hooks/statusline.sh"}
     ')
   else
     UPDATED=$(echo "$EXISTING" | jq \
@@ -116,7 +124,7 @@ if [ -f "$SETTINGS_FILE" ]; then
       --argjson post_hook "$POST_HOOK_CONFIG" \
       --argjson stop_hook "$SESSION_END_HOOK_CONFIG" \
       --argjson prompt_hook "$PROMPT_HOOK_CONFIG" '
-      .hooks = { "PreToolUse": [$pre_hook], "PostToolUse": [$post_hook], "SessionEnd": [$stop_hook], "UserPromptSubmit": [$prompt_hook] }
+      .hooks = { "PreToolUse": [$pre_hook], "PostToolUse": [$post_hook], "SessionEnd": [$stop_hook], "UserPromptSubmit": [$prompt_hook] } | .statusLine = {"type": "command", "command": "~/.claude/hooks/statusline.sh"}
     ')
   fi
 
