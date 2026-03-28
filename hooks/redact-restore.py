@@ -34,6 +34,18 @@ import hashlib
 import tempfile
 import shutil
 import fcntl
+import fnmatch
+import stat as stat_module
+import time
+
+# ── Debug logging ────────────────────────────────────────────────────────
+DEBUG = os.environ.get("REDACT_DEBUG", "0") == "1"
+
+
+def debug_log(msg):
+    """Log to stderr when REDACT_DEBUG=1."""
+    if DEBUG:
+        print(f"[redact-restore {time.strftime('%H:%M:%S')}] {msg}", file=sys.stderr)
 
 # ── Load patterns ────────────────────────────────────────────────────────
 # Import from patterns.py in the same directory, or fall back to inline
@@ -100,13 +112,45 @@ for name, regex in SECRET_PATTERNS:
     except re.error:
         pass
 
+# ── Binary file detection ────────────────────────────────────────────────
+def is_binary_file(file_path):
+    """Return True if the file appears to be binary (contains null bytes in first 8KB)."""
+    try:
+        with open(file_path, 'rb') as f:
+            chunk = f.read(8192)
+            return b'\x00' in chunk
+    except (OSError, PermissionError):
+        return False
+
+
+# ── Allowlist (.claude-redact-ignore) ────────────────────────────────────
+def is_ignored(file_path):
+    """Check if file matches any pattern in .claude-redact-ignore."""
+    for ignore_file in [os.path.join(os.getcwd(), '.claude-redact-ignore'),
+                        os.path.expanduser('~/.claude-redact-ignore')]:
+        if os.path.exists(ignore_file):
+            try:
+                with open(ignore_file) as f:
+                    for pattern in f:
+                        pattern = pattern.strip()
+                        if pattern and not pattern.startswith('#'):
+                            if fnmatch.fnmatch(file_path, pattern) or fnmatch.fnmatch(os.path.basename(file_path), pattern):
+                                debug_log(f"File {file_path} ignored by pattern '{pattern}' in {ignore_file}")
+                                return True
+            except (OSError, PermissionError):
+                pass
+    return False
+
+
 # ── Read hook input ──────────────────────────────────────────────────────
 try:
     input_data = json.loads(sys.stdin.read())
 except (json.JSONDecodeError, EOFError):
+    debug_log("No valid JSON on stdin, exiting")
     sys.exit(0)
 
 if not isinstance(input_data, dict):
+    debug_log(f"Input is not a dict (type={type(input_data).__name__}), exiting")
     sys.exit(0)
 
 try:
@@ -114,6 +158,8 @@ try:
     tool_input = input_data.get("tool_input", {})
     session_id = input_data.get("session_id", "default")
     is_post_hook = "tool_result" in input_data
+
+    debug_log(f"Hook start: tool={tool_name} post={is_post_hook} session={session_id}")
 
     MAPPING_FILE = f"/tmp/.claude-redact-{session_id}.json"
     BACKUP_DIR = os.path.join(tempfile.gettempdir(), f".claude-backup-{session_id}")
@@ -141,6 +187,11 @@ try:
                 bak_path = os.path.join(BACKUP_DIR, entry[:-5] + ".bak")
                 if os.path.exists(bak_path) and os.path.isfile(original_path):
                     shutil.copy2(bak_path, original_path)
+                    # Restore original permissions and timestamps from metadata
+                    if "mode" in meta:
+                        os.chmod(original_path, meta["mode"])
+                    if "atime" in meta and "mtime" in meta:
+                        os.utime(original_path, (meta["atime"], meta["mtime"]))
                 for p in (meta_path, bak_path):
                     if os.path.exists(p):
                         os.remove(p)
@@ -181,6 +232,7 @@ try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 json.dump(mapping, f)
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            debug_log(f"Mapping saved: {len(mapping.get('secret_to_placeholder', {}))} secrets")
         except OSError:
             pass
 
@@ -219,6 +271,8 @@ try:
         if not matches:
             return content, False
 
+        debug_log(f"Found {len(matches)} secret match(es)")
+
         # Sort by start position descending (replace from end to avoid position shifting)
         matches.sort(key=lambda x: x[0], reverse=True)
 
@@ -250,6 +304,15 @@ try:
 
         Returns True if the file was redacted, False otherwise.
         """
+        # Skip binary files
+        if is_binary_file(file_path):
+            debug_log(f"Skipping binary file: {file_path}")
+            return False
+
+        # Skip files matching allowlist
+        if is_ignored(file_path):
+            return False
+
         try:
             with open(file_path, "rb") as f:
                 raw_bytes = f.read()
@@ -269,17 +332,36 @@ try:
             fd = os.open(bp + ".bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "wb") as f:
                 f.write(raw_bytes)
-            with open(bp + ".meta", "w") as f:
-                json.dump({"original_path": file_path}, f)
+            file_stat = os.stat(file_path)
+            saved_mode = file_stat.st_mode
 
-            stat = os.stat(file_path)
-            saved_mode = stat.st_mode
-            with open(file_path, "w") as f:
-                f.write(redacted)
+            with open(bp + ".meta", "w") as f:
+                json.dump({
+                    "original_path": file_path,
+                    "mode": saved_mode,
+                    "atime": file_stat.st_atime,
+                    "mtime": file_stat.st_mtime,
+                }, f)
+
+            # Atomic write: write to temp file first, then rename (POSIX atomic)
+            dir_name = os.path.dirname(file_path)
+            with tempfile.NamedTemporaryFile(dir=dir_name, delete=False, mode='w', suffix='.tmp') as tmp:
+                tmp.write(redacted)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.rename(tmp.name, file_path)
             os.chmod(file_path, saved_mode)
-            os.utime(file_path, (stat.st_atime, stat.st_mtime))
+            os.utime(file_path, (file_stat.st_atime, file_stat.st_mtime))
+
+            debug_log(f"File redacted: {file_path}")
             return True
         except (OSError, PermissionError):
+            # Clean up temp file if rename failed
+            try:
+                if 'tmp' in dir() and hasattr(tmp, 'name') and os.path.exists(tmp.name):
+                    os.remove(tmp.name)
+            except OSError:
+                pass
             for suffix in (".bak", ".meta"):
                 try:
                     os.remove(bp + suffix)
@@ -296,6 +378,7 @@ try:
                 os.remove(bp + suffix)
             except OSError:
                 pass
+        debug_log(f"Backup cleaned up: {file_path}")
 
 
     # ── Strategy 1: Check block list ─────────────────────────────────────────
@@ -343,11 +426,27 @@ try:
         if file_path and tool_name in ("Read", "Write", "Edit"):
             bp = backup_path_for(file_path)
             bak_file = bp + ".bak"
+            meta_file = bp + ".meta"
+            # Load original metadata (permissions, timestamps)
+            orig_meta = {}
+            if os.path.exists(meta_file):
+                try:
+                    with open(meta_file) as mf:
+                        orig_meta = json.load(mf)
+                except (json.JSONDecodeError, OSError):
+                    pass
+
             if os.path.exists(bak_file):
                 if tool_name == "Read":
                     # Restore original content after Read
+                    debug_log(f"Restoring file after Read: {file_path}")
                     try:
                         shutil.copy2(bak_file, file_path)
+                        # Restore original permissions and timestamps
+                        if "mode" in orig_meta:
+                            os.chmod(file_path, orig_meta["mode"])
+                        if "atime" in orig_meta and "mtime" in orig_meta:
+                            os.utime(file_path, (orig_meta["atime"], orig_meta["mtime"]))
                     except OSError:
                         pass
                 elif tool_name == "Edit":
@@ -379,6 +478,7 @@ try:
     # SessionEnd / Stop hook: Clean up sensitive mapping and backup files
     # ══════════════════════════════════════════════════════════════════════════
     if input_data.get("type") in ("SessionEnd", "Stop") or tool_name in ("SessionEnd", "Stop"):
+        debug_log("Session end: cleaning up mapping and backups")
         # Remove the mapping file (contains real secret values)
         try:
             if os.path.exists(MAPPING_FILE):
@@ -412,6 +512,14 @@ try:
         # Strategy 2: Backup original, overwrite with redacted content, allow Read.
         # PostToolUse restores the original after Read completes.
         if file_path and os.path.isfile(file_path):
+            # Skip binary files and ignored files early
+            if is_binary_file(file_path):
+                debug_log(f"Skipping binary file for Read: {file_path}")
+                sys.exit(0)
+            if is_ignored(file_path):
+                debug_log(f"Skipping ignored file for Read: {file_path}")
+                sys.exit(0)
+
             mapping = load_mapping()
             if backup_and_redact_file(file_path, mapping):
                 sys.exit(0)
