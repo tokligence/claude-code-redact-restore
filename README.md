@@ -51,7 +51,7 @@ curl -sL https://raw.githubusercontent.com/tokligence/claude-code-redact-restore
 
 ### Hook Registration
 
-The hook registers for **two** Claude Code hook events:
+The hook registers for **three** Claude Code hook events:
 
 | Hook Event | Matcher | Purpose |
 |------------|---------|---------|
