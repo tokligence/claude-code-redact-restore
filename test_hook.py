@@ -1176,4 +1176,4 @@ class TestUserPromptSubmit:
     def test_tip_in_reason(self):
         result, code, _ = self._run_prompt_hook("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmn")
         assert code == 0 and result is not None
-        assert ".secrets.conf" in result["reason"]
+        assert ".tmp_secrets.conf" in result["reason"]

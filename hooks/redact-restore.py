@@ -210,9 +210,9 @@ try:
                     f"🛡️ Message blocked — secret detected: {secret_list}{extra}.\n\n"
                     f"Pasting secrets directly in chat is a data leak risk.\n\n"
                     f"Do this instead:\n"
-                    f"  1. Save your secret to .secrets.conf:\n"
-                    f"       echo \"MY_KEY=your-secret-value\" >> .secrets.conf\n"
-                    f"  2. Tell Claude: \"my API key is in .secrets.conf\"\n"
+                    f"  1. Save your secret to .tmp_secrets.conf:\n"
+                    f"       echo \"MY_KEY=your-secret-value\" >> .tmp_secrets.conf\n"
+                    f"  2. Tell Claude: \"my API key is in .tmp_secrets.conf\"\n"
                     f"  3. Claude reads the file — secret is auto-redacted and protected.\n\n"
                     f"Your secret never leaves your machine."
                 )
@@ -501,6 +501,40 @@ try:
         debug_log(f"Backup cleaned up: {file_path}")
 
 
+
+    # ── Auto-gitignore .tmp_secrets.conf ────────────────────────────────────
+    def ensure_gitignore(file_path):
+        """If file_path is .tmp_secrets.conf, ensure it's in the nearest .gitignore."""
+        if os.path.basename(file_path) != ".tmp_secrets.conf":
+            return
+        # Find the repo root (nearest .git directory)
+        d = os.path.dirname(os.path.abspath(file_path))
+        gitignore_path = None
+        while d != os.path.dirname(d):
+            if os.path.isdir(os.path.join(d, ".git")):
+                gitignore_path = os.path.join(d, ".gitignore")
+                break
+            d = os.path.dirname(d)
+        if not gitignore_path:
+            return
+        # Check if already ignored
+        entry = ".tmp_secrets.conf"
+        if os.path.exists(gitignore_path):
+            try:
+                with open(gitignore_path, "r") as f:
+                    if entry in f.read():
+                        return
+            except OSError:
+                return
+        # Append to .gitignore
+        try:
+            with open(gitignore_path, "a") as f:
+                f.write(f"\n# Auto-added by claude-secret-shield\n{entry}\n")
+            debug_log(f"Added {entry} to {gitignore_path}")
+        except OSError:
+            pass
+
+
     # ── Strategy 1: Check block list ─────────────────────────────────────────
     def is_blocked_file(file_path):
         """Check if a file path matches any blocked pattern."""
@@ -616,6 +650,9 @@ try:
     # ── Handle Read tool ─────────────────────────────────────────────────────
     if tool_name == "Read":
         file_path = tool_input.get("file_path", "")
+
+        # Auto-gitignore .tmp_secrets.conf on first read
+        ensure_gitignore(file_path)
 
         # Strategy 1: Block list
         blocked, matched_pattern = is_blocked_file(file_path)
