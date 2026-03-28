@@ -262,6 +262,10 @@ SECRET_PATTERNS = [
     ("COCKROACHDB_URL", r'cockroachdb(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
     # MariaDB (explicit scheme, not just mysql://)
     ("MARIADB_URL", r'mariadb(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    # TiDB (uses mysql protocol but has tidb:// scheme in some tools)
+    ("TIDB_URL", r'tidb(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    # ClickHouse
+    ("CLICKHOUSE_URL", r'clickhouse(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
     ("REDIS_URL", r'rediss?://[^\s"\'<>]*:[^\s"\'<>@]+@[^\s"\'<>]+'),
     # PlanetScale
     ("PLANETSCALE_PASSWORD", r'pscale_pw_[A-Za-z0-9_-]{43}'),
