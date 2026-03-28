@@ -4,7 +4,10 @@ Secret patterns for claude-secret-shield
 Users can customize by editing this file or adding patterns to:
   ~/.claude/hooks/redact-patterns.py
 
-Patterns sourced from 150+ providers via tokligence_guard and gitleaks.
+140 secret patterns + 37 blocked files, sourced from 200+ providers
+via tokligence_guard, gitleaks, and GitHub secret scanning coverage.
+
+March 2026 additions: LangSmith, PostHog, Pinecone, Vercel, Atlassian, Brevo.
 """
 
 # ── Strategy 1: Block list ──────────────────────────────────────────────
@@ -41,6 +44,12 @@ BLOCKED_FILES = [
     ".docker/config.json",
     ".git-credentials",
     ".netrc",
+    ".env.staging.local",
+    ".env.production.local",
+    "token.json",
+    "oauth-credentials.json",
+    ".kaggle/kaggle.json",
+    "application-default-credentials.json",
 ]
 
 # ── Strategy 2: Secret patterns ─────────────────────────────────────────
@@ -77,6 +86,16 @@ SECRET_PATTERNS = [
     ("REPLICATE_TOKEN", r'r8_[a-zA-Z0-9]{37}'),
     # DeepSeek
     ("DEEPSEEK_KEY", r'sk-[a-f0-9]{48}'),
+    # Cohere
+    ("CO_API_KEY", r'co-[a-zA-Z0-9]{40}'),
+    # Fireworks AI
+    ("FIREWORKS_KEY", r'fw_[a-zA-Z0-9]{40,}'),
+    # LangSmith (March 2026 GitHub secret scanning)
+    ("LANGSMITH_KEY", r'lsv2_pt_[a-f0-9]{32}_[a-f0-9]{10}'),
+    # PostHog (March 2026 GitHub secret scanning)
+    ("POSTHOG_TOKEN", r'phx_[a-zA-Z0-9]{40,}'),
+    # Pinecone (March 2026 GitHub secret scanning)
+    ("PINECONE_KEY", r'pcsk_[a-zA-Z0-9_-]{50,}'),
     # Google AI / Gemini / Firebase
     ("GCP_API_KEY", r'AIza[0-9A-Za-z_-]{35}'),
 
@@ -98,6 +117,14 @@ SECRET_PATTERNS = [
     ("ALIBABA_ACCESS_KEY", r'LTAI[A-Za-z0-9]{20}'),
     # Tencent Cloud
     ("TENCENT_SECRET_ID", r'AKID[A-Za-z0-9]{32}'),
+    # GCP service account private key id
+    ("GCP_SA_PRIVATE_KEY_ID", r'"private_key_id"\s*:\s*"[a-f0-9]{40}"'),
+    # Azure AD app secret
+    ("AZURE_AD_SECRET", r'(?i)(?:azure|ad|aad)[_-]?(?:client)?[_-]?secret["\']?\s*[:=]\s*["\']?~[A-Za-z0-9_~.-]{34}["\']?'),
+    # Azure SQL connection string
+    ("AZURE_SQL_CONN", r'(?i)Server=.*\.database\.windows\.net.*Password=[^;]+'),
+    # IBM Cloud API key
+    ("IBM_CLOUD_KEY", r'(?i)ibm[_-]?(?:cloud)?[_-]?api[_-]?key["\']?\s*[:=]\s*["\']?[a-zA-Z0-9_-]{44}["\']?'),
 
     # ================================================================
     # DEVOPS / CI-CD / PACKAGE REGISTRIES
@@ -148,6 +175,22 @@ SECRET_PATTERNS = [
     ("LINEAR_KEY", r'lin_api_[A-Za-z0-9]{40}'),
     # Scalingo
     ("SCALINGO_TOKEN", r'tk-us-[a-zA-Z0-9_-]{48}'),
+    # CircleCI
+    ("CIRCLECI_TOKEN", r'(?i)(?:circle[_-]?ci[_-]?token|CIRCLE_TOKEN)["\']?\s*[:=]\s*["\']?[a-f0-9]{40}["\']?'),
+    # Buildkite
+    ("BUILDKITE_TOKEN", r'bkua_[a-zA-Z0-9]{40}'),
+    # Fly.io
+    ("FLYIO_TOKEN", r'fo1_[a-zA-Z0-9_-]{43}'),
+    # Render
+    ("RENDER_TOKEN", r'rnd_[a-zA-Z0-9]{32,}'),
+    # Vercel (March 2026 GitHub secret scanning)
+    ("VERCEL_TOKEN", r'vercel_[a-zA-Z0-9]{24,}'),
+    # Supabase service key
+    ("SUPABASE_KEY", r'sbp_[a-f0-9]{40}'),
+    # SonarQube
+    ("SONARQUBE_TOKEN", r'sqp_[a-f0-9]{40}'),
+    # Databricks
+    ("DATABRICKS_TOKEN", r'dapi[a-f0-9]{32}'),
 
     # ================================================================
     # PAYMENT PROCESSORS
@@ -168,6 +211,10 @@ SECRET_PATTERNS = [
     # Flutterwave
     ("FLUTTERWAVE_SECRET", r'FLWSECK(?:_TEST)?-[a-f0-9]{32}-X'),
     ("FLUTTERWAVE_PUBLIC", r'FLWPUBK(?:_TEST)?-[a-f0-9]{32}-X'),
+    # Razorpay
+    ("RAZORPAY_KEY", r'rzp_(?:live|test)_[a-zA-Z0-9]{14}'),
+    # Plaid
+    ("PLAID_TOKEN", r'(?:access|client|secret|public)-(?:sandbox|development|production)-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'),
 
     # ================================================================
     # COMMUNICATION / MESSAGING
@@ -194,6 +241,10 @@ SECRET_PATTERNS = [
     ("TELEGRAM_BOT_TOKEN", r'\d{8,10}:[A-Za-z0-9_-]{35}'),
     # Microsoft Teams webhook
     ("TEAMS_WEBHOOK", r'https://[a-z0-9-]+\.webhook\.office\.com/webhookb2/[a-f0-9-]{36}@[a-f0-9-]{36}/IncomingWebhook/[a-f0-9]{32}/[a-f0-9-]{36}'),
+    # Brevo/Sendinblue (March 2026)
+    ("BREVO_KEY", r'xkeysib-[a-f0-9]{64}-[a-zA-Z0-9]{16}'),
+    # Intercom (base64 tok: prefix)
+    ("INTERCOM_TOKEN", r'dG9rO[a-zA-Z0-9_-]{36,}='),
 
     # ================================================================
     # DATABASE / STORAGE
@@ -223,6 +274,10 @@ SECRET_PATTERNS = [
     ("SENTRY_AUTH_TOKEN", r'sntrys_[A-Za-z0-9_]{38,}'),
     # Dynatrace
     ("DYNATRACE_TOKEN", r'dt0c01\.[A-Z0-9]{24}\.[A-Z0-9]{64}'),
+    # Datadog
+    ("DATADOG_KEY", r'dd[a-z]{1}[a-f0-9]{40}'),
+    # LaunchDarkly
+    ("LAUNCHDARKLY_KEY", r'(?:api|sdk|mob)-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'),
 
     # ================================================================
     # AUTH PROVIDERS
@@ -232,6 +287,8 @@ SECRET_PATTERNS = [
     ("ONEPASSWORD_SECRET_KEY", r'A3-[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}'),
     # Age encryption
     ("AGE_SECRET_KEY", r'AGE-SECRET-KEY-1[QPZRY9X8GF2TVDW0S3JN54KHCE6MUA7L]{58}'),
+    # Okta
+    ("OKTA_TOKEN", r'00[a-zA-Z0-9_-]{40}'),
 
     # ================================================================
     # OTHER SERVICES
@@ -260,6 +317,21 @@ SECRET_PATTERNS = [
     ("FRAMEIO_TOKEN", r'fio-u-[A-Za-z0-9_-]{64}'),
     # Typeform
     ("TYPEFORM_PAT", r'tfp_[a-zA-Z0-9_-]{44}_[a-zA-Z0-9_-]{14}'),
+    # Airtable
+    ("AIRTABLE_PAT", r'pat[a-zA-Z0-9]{14}\.[a-f0-9]{64}'),
+    # Notion
+    ("NOTION_TOKEN", r'ntn_[a-zA-Z0-9]{43,}'),
+    ("NOTION_SECRET", r'secret_[a-zA-Z0-9]{43,}'),
+    # Asana
+    ("ASANA_PAT", r'[0-9]{1}/[0-9]{13}:[a-zA-Z0-9]{32}'),
+    # Figma
+    ("FIGMA_PAT", r'figd_[a-zA-Z0-9_-]{40,}'),
+    # Contentstack
+    ("CONTENTSTACK_TOKEN", r'cs[a-z0-9]{35}'),
+    # Atlassian API token (March 2026)
+    ("ATLASSIAN_TOKEN", r'ATATT[a-zA-Z0-9_-]{60,}'),
+    # Cloudflare API token
+    ("CLOUDFLARE_API_TOKEN", r'v1\.0-[a-f0-9]{24}-[a-f0-9]{146}'),
 
     # ================================================================
     # GIT CREDENTIALS (URLs with embedded tokens)

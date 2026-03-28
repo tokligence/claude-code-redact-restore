@@ -6,8 +6,8 @@
 
 ## Features
 
-- **108 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more
-- **30 blocked file types** -- `.env`, `credentials.json`, `id_rsa`, `.pem`, `.p12`, `.pfx`, and more
+- **140 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more
+- **36 blocked file types** -- `.env`, `credentials.json`, `id_rsa`, `.pem`, `.p12`, `.pfx`, and more
 - **Automatic restore** -- secrets restored to real values when Claude writes code
 - **Global persistent mapping** -- same secret always produces the same placeholder, across sessions
 - **Encrypted at rest** -- mapping file encrypted with Fernet (AES-128-CBC + HMAC-SHA256)
@@ -40,7 +40,7 @@ Three strategies work together to keep your secrets safe:
 ```
 
 **Layer 1 -- Block List:** Some files should never be read at all. When Claude tries
-to read `.env`, `credentials.json`, `id_rsa`, or any of the 30 blocked file types,
+to read `.env`, `credentials.json`, `id_rsa`, or any of the 36 blocked file types,
 the hook denies the read entirely. Claude gets an error message suggesting alternatives.
 
 **Layer 2 -- Pattern Redaction:** For every other file, the hook scans the content
@@ -157,7 +157,7 @@ If a Read is denied or redirected, Claude cannot Write or Edit that file later (
 with "file has not been read yet"). The solution:
 
 1. `PreToolUse` fires for `Read(/path/to/config.py)`
-2. Hook reads the file, scans against 108 patterns
+2. Hook reads the file, scans against 140 patterns
 3. Hook backs up the original to `/tmp/.claude-backup-{session}/`
 4. Hook overwrites the file in-place with redacted content (preserving timestamps)
 5. Hook exits 0 (allow) -- Claude reads the redacted file normally
@@ -175,7 +175,10 @@ backups automatically. No manual intervention needed.
 
 ## Secret Patterns
 
-108 patterns organized by category:
+For the complete pattern catalog with prefixes, examples, and selection criteria, see [docs/PATTERNS.md](docs/PATTERNS.md).
+
+
+140 patterns organized by category:
 
 | Category | Count | Examples |
 |----------|------:|---------|
@@ -203,7 +206,7 @@ This is a **Claude Code hook** that prevents Claude from **seeing** your real se
 
 | Threat | Protected? | How |
 |--------|-----------|-----|
-| Claude seeing your API keys in code | Yes | Pattern-based redaction (108 patterns) |
+| Claude seeing your API keys in code | Yes | Pattern-based redaction (140 patterns) |
 | Claude reading .env / credentials files | Yes | File blocking (30 file types) |
 | Claude seeing database passwords in connection strings | Yes | Pattern matching (MongoDB, PostgreSQL, MySQL, Redis URLs) |
 | Claude seeing private keys (RSA, Ed25519, etc.) | Yes | PEM header detection + file blocking |

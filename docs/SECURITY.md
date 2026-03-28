@@ -378,7 +378,7 @@ The mapping file on disk is encrypted. The key exists only on your machine.
 |---------|---------------------------|-----------|---------------------------|---------------|
 | Automatic | Yes | No | Partial | No |
 | Works with Claude Code | Yes | No (Claude still reads) | No | Yes (tedious) |
-| Catches secrets in any file | Yes (108 patterns) | No | No | Human judgment |
+| Catches secrets in any file | Yes (140 patterns) | No | No | Human judgment |
 | Encrypted mapping | Yes (Fernet) | N/A | Yes | N/A |
 | Cross-session consistency | Yes (HMAC) | N/A | N/A | N/A |
 | Blocks dangerous files | Yes (30 types) | Prevents git commit only | No | No |
