@@ -8,6 +8,8 @@
 
 [![GitHub stars](https://img.shields.io/github/stars/tokligence/claude-secret-shield?style=social)](https://github.com/tokligence/claude-secret-shield)
 
+![claude-secret-shield 效果图](docs/example.png)
+
 ## 功能特性
 
 - **164 种秘密模式** -- 涵盖 OpenAI、Anthropic、AWS、GitHub、Stripe、Slack、数据库连接串、私钥、JWT 等 90+ 种类型

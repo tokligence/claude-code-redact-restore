@@ -8,6 +8,8 @@ If you find this useful, please give it a star to help others discover it.
 
 [![GitHub stars](https://img.shields.io/github/stars/tokligence/claude-secret-shield?style=social)](https://github.com/tokligence/claude-secret-shield)
 
+![claude-secret-shield in action](docs/example.png)
+
 ## Features
 
 - **164 secret patterns** -- OpenAI, Anthropic, AWS, GitHub, Stripe, Slack, database URLs, private keys, JWTs, and 90+ more
