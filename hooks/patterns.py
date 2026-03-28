@@ -254,6 +254,14 @@ SECRET_PATTERNS = [
     ("MONGODB_URL", r'mongodb(?:\+srv)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
     ("POSTGRES_URL", r'postgres(?:ql)?(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
     ("MYSQL_URL", r'mysql(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    # MSSQL (SQL Server)
+    ("MSSQL_URL", r'mssql(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    # Oracle
+    ("ORACLE_URL", r'oracle(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    # CockroachDB (uses cockroachdb:// scheme)
+    ("COCKROACHDB_URL", r'cockroachdb(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
+    # MariaDB (explicit scheme, not just mysql://)
+    ("MARIADB_URL", r'mariadb(?:\+[a-z0-9_]+)?://[^\s"\'<>]+:[^\s"\'<>@]+@[^\s"\'<>]+'),
     ("REDIS_URL", r'rediss?://[^\s"\'<>]*:[^\s"\'<>@]+@[^\s"\'<>]+'),
     # PlanetScale
     ("PLANETSCALE_PASSWORD", r'pscale_pw_[A-Za-z0-9_-]{43}'),
