@@ -271,32 +271,59 @@ redmem install    # configures Claude Code hooks
 # Done. Protection + memory are automatic from now on.
 ```
 
+## Uninstall
+
+```bash
+./uninstall.sh                       # remove redmem, keep memory archive
+./uninstall.sh --purge               # also wipe vault + image cache + secret mappings
+./uninstall.sh --keep-custom-patterns  # don't delete custom-patterns.py
+```
+
+Designed to never make things worse. It:
+- removes only files that `install.sh` puts down (won't touch your own scripts in `~/.claude/hooks/`),
+- strips only hook entries whose command path points at redmem (your custom hooks survive),
+- strips only the managed CLAUDE.md section between the markers (your other CLAUDE.md content is preserved),
+- preserves the memory archive at `~/.claude/vault/sessions/` by default — `--purge` is the explicit opt-in to wipe it,
+- preserves your own `statusLine` if it isn't ours.
+
+Verified end-to-end by `test_uninstall.py` (19 tests): clean install→uninstall round-trip produces a byte-identical CLAUDE.md, custom hooks/statusLine/theme survive, mid-file CLAUDE.md sections are sliced cleanly, and `--with-guard` installs are reversible too. Worst-case escape hatch from any future bug.
+
 ## How It Works
 
 ```
-User message
+Claude Code event
   |
   v
-redmem_dispatcher.py
+redmem_dispatcher.py  (single gateway; shield/memory/autopilot/image-compressor/cheatsheet inside)
   |
   +-- UserPromptSubmit
-  |     1. Shield: scan for secrets, block if found
-  |     2. Memory: search archive if recall keywords detected
+  |     1. Shield: scan prompt for secret paste; block if found
+  |     2. Memory: search archive on recall keywords (remember/before/之前/...)
+  |     3. Autopilot init: if /autopilot was issued, run preflight + arm state
+  |     4. Cheatsheet: inject post-compact tools reminder if flagged
   |
   +-- PreToolUse (Read/Write/Edit/Bash)
-  |     Shield: redact secrets / restore placeholders
+  |     1. Shield: secret redact/restore on file_path/content
+  |     2. Image-original sentinel: intercept `redmem-original <path>` Bash
+  |     3. Autopilot bash guard: deny rm-rf / git reset --hard / etc when armed
+  |     4. Image compressor: rewrite Read of large images to a cache copy
   |
-  +-- PostToolUse (Read/Write/Edit/Bash)
-  |     Shield: restore files / scan for residual placeholders
-  |
-  +-- PostToolUse (TodoWrite/TaskUpdate/PlanMode)
-  |     Memory: track task/plan changes -> state_events
+  +-- PostToolUse (Read/Write/Edit/Bash/Todo*/Task*/Plan*)
+  |     1. Shield: restore files / scan residual placeholders
+  |     2. Memory: track task/plan events → state_events
+  |     3. Image notice: tell Claude how to fetch original if a compressed
+  |        image was just served
   |
   +-- PreCompact
-  |     Memory: archive turns to SQLite FTS5 + generate session_state.md
+  |     1. Memory: archive turns to SQLite FTS5 + generate session_state.md
+  |     2. Cheatsheet: flag this session so next UserPromptSubmit re-injects
+  |        the tools cheatsheet (post-compact reminder)
   |
   +-- SessionStart (resume)
   |     Memory: inject session state + recent context as additionalContext
+  |
+  +-- Stop
+  |     Autopilot: emit continuation if loop active and CC didn't signal done
   |
   +-- SessionEnd
         Shield: cleanup backup directory
