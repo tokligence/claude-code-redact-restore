@@ -82,6 +82,28 @@ No configuration needed. If you ever want to disable native recap:
 - Housekeeping files (`.tmp_secrets.*`) auto-registered in `.git/info/exclude`
   on first create — never leak into `git status` or `.gitignore`
 
+### Tool-availability reminder (post-compact)
+
+Claude Code's auto-compact compresses earlier turns into a lossy summary.
+Mid-session demonstrations of redmem capabilities (the `redmem-original`
+sentinel, autopilot's bash-guard rules, etc.) can disappear. redmem
+re-injects a concise cheatsheet on the **first UserPromptSubmit after
+each compact**:
+
+- `PreCompact` writes a flag for the session.
+- The next `UserPromptSubmit` consumes the flag and prepends a short
+  capability summary to `hookSpecificOutput.additionalContext`.
+
+Cost: ~400 tokens, once per compact. Phrasing is deliberately
+informational ("here's what's available") rather than directive ("now
+use this") — Claude doesn't change behaviour because of the reminder,
+it just remembers the tools exist when relevant.
+
+CLAUDE.md is also auto-extended at install time with the same tool
+summary, so new/resumed sessions know what's available from the start.
+(The reminder is for sessions that lose this knowledge mid-session via
+compaction.)
+
 ### Session Memory (Layer B)
 
 - **PreCompact archive** — full conversation saved to SQLite FTS5 before compaction

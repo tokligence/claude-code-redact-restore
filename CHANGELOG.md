@@ -5,6 +5,9 @@ All notable changes to redmem will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Post-compact tools cheatsheet** (`hooks/cheatsheet.py`): re-injects a concise capability summary into Claude's context on the first `UserPromptSubmit` after each auto-compact, so it remembers `redmem-original`, the autopilot bash-guard rules, the shield placeholder protocol, and memory-recall keywords even after lossy compaction. `PreCompact` writes a session-scoped flag; the next `UserPromptSubmit` consumes the flag (one-shot) and prepends the cheatsheet text via `additionalContext`. ~400 tokens per compact. Phrased as informational, not directive.
+  - Install also extends the managed CLAUDE.md section (`<!-- claude-secret-shield:* -->` markers, name preserved for upgrade idempotency) to cover all redmem tools — Shield, Image compressor, Autopilot, Memory — instead of Shield only.
+  - 8 tests (`test_cheatsheet.py`) including two end-to-end stdin runs against the real dispatcher.
 - **Image compressor** (`hooks/image_compressor.py`): transparently downscale large images before Claude reads them, cutting vision tokens (~66% on a typical phone screenshot) without altering the on-disk file.
   - Fires from `PreToolUse(Read)` via the dispatcher; returns `updatedInput` with a compressed cache path.
   - Thresholds: only rewrites images > 500 KB AND longest side > 1920 px. Smaller images pass through unchanged.

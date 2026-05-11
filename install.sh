@@ -122,7 +122,8 @@ install_file "hooks/redmem_catchup.py"    "$HOOKS_DIR/redmem_catchup.py"
 chmod +x "$HOOKS_DIR/redmem_catchup.py"
 install_file "hooks/image_compressor.py"  "$HOOKS_DIR/image_compressor.py"
 chmod +x "$HOOKS_DIR/image_compressor.py"
-echo "  OK: Dispatcher + catchup + image compressor installed"
+install_file "hooks/cheatsheet.py"        "$HOOKS_DIR/cheatsheet.py"
+echo "  OK: Dispatcher + catchup + image compressor + cheatsheet installed"
 
 # ── Autopilot module + slash commands ───────────────────────────────────
 echo "  -> Installing autopilot module..."
@@ -246,18 +247,53 @@ MARKER_START="<!-- claude-secret-shield:start -->"
 MARKER_END="<!-- claude-secret-shield:end -->"
 
 SHIELD_SECTION="${MARKER_START}
-## Secret Shield
+## redmem capabilities
 
-This environment uses **redmem**. Values in \`{{NAME_hash}}\` format
-(e.g. \`{{OPENAI_KEY_8f3a2b1c}}\`, \`{{WALLET_PRIVATE_KEY_d4e5f6a7}}\`) are
-**redacted secret placeholders** — the real values have been replaced for safety.
+This environment uses the **redmem** plugin. The following are informational —
+use them when relevant; don't change your default behaviour because of this
+section.
 
-Rules for working with placeholders:
+### Secret shield
+
+Values like \`{{OPENAI_KEY_8f3a2b1c}}\`, \`{{WALLET_PRIVATE_KEY_d4e5f6a7}}\`
+in any file you read are **redacted placeholders** — the real values have
+been replaced for safety, and the hook restores them on write.
 - Treat placeholders as the actual secret values for all tasks.
 - Use them as-is in code, file edits, and shell commands.
-- The hook automatically restores real values before execution.
 - **Never** ask the user to substitute, reveal, or re-enter the real values.
 - **Never** attempt to guess, decode, or reconstruct the original secrets.
+
+### Image compressor
+
+Reading images larger than 500 KB and longer than 1920 px on the long side
+serves a downscaled cache copy automatically (saves vision tokens). If you
+cannot make out small text or pixel-level UI detail in an image you just
+read, run this sentinel bash command:
+
+    redmem-original /absolute/path/to/image.png
+
+It is **not a real program** — a hook intercepts it, sets a one-shot
+session-scoped flag, and denies the bash call. The next \`Read\` of that
+path in this session will then serve the uncompressed original.
+
+### Autopilot
+
+If \`.autopilot/\` exists in the repo root, autopilot mode is armed. While
+armed, destructive bash patterns are denied: \`rm -rf\`, \`git reset --hard\`,
+\`git checkout -f\`, \`git clean -fdx\`, \`git branch -D\`,
+\`git push --force\`, \`DROP TABLE|DATABASE|SCHEMA|INDEX\`, \`TRUNCATE\`.
+Reach for \`mv\` to \`~/.autopilot-trash/<timestamp>/\`, \`git stash\`, or
+\`git revert\` instead. Maintain \`.autopilot/TASKS.md\`, defer
+unanswerable decisions to \`.autopilot/QUESTIONS.md\`, log spec
+improvements to \`.autopilot/IMPROVE.md\`. End by emitting
+\`[[AUTOPILOT_DONE]]\` once you've done all you can.
+
+### Session memory
+
+When the user says \"remember\", \"before\", \"earlier\", \"之前\",
+\"上次\", \"记得\", an archive search of prior sessions runs automatically
+and any relevant snippets get injected into your context. You don't need
+to invoke this.
 ${MARKER_END}"
 
 echo "  -> Configuring CLAUDE.md..."

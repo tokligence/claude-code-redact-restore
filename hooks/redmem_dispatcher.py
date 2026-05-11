@@ -51,7 +51,9 @@ def run_shield(input_json: str) -> dict:
 
 
 def handle_pre_compact(data: dict):
-    """Archive turns to SQLite on compact."""
+    """Archive turns to SQLite on compact, then flag the session so the
+    next UserPromptSubmit can re-inject the tools cheatsheet (Claude may
+    have lost mid-session knowledge of available tools during compact)."""
     session_id = data.get("session_id", "")
     cwd = data.get("cwd", "")
     if not session_id:
@@ -70,6 +72,13 @@ def handle_pre_compact(data: dict):
         update_session_knowledge(session_id, cwd)
     except Exception as e:
         sys.stderr.write(f"[redmem] Archive error: {e}\n")
+
+    # Drop the cheatsheet flag — independent of memory's success.
+    try:
+        from cheatsheet import mark_compact_pending
+        mark_compact_pending(session_id)
+    except Exception as e:
+        sys.stderr.write(f"[redmem] cheatsheet mark error: {e}\n")
 
 
 def handle_session_start(data: dict):
@@ -160,6 +169,22 @@ def handle_user_prompt_memory(data: dict, shield_result: dict) -> dict:
         sys.stderr.write(f"[redmem] Search error: {e}\n")
 
     return shield_result
+
+
+def handle_cheatsheet_inject(data: dict) -> str:
+    """If PreCompact flagged this session, consume the flag and return
+    the cheatsheet text to prepend to additionalContext. Empty string
+    otherwise. Fail-open."""
+    session_id = data.get("session_id", "") or ""
+    if not session_id:
+        return ""
+    try:
+        from cheatsheet import consume_compact_pending, cheatsheet_text
+        if consume_compact_pending(session_id):
+            return cheatsheet_text()
+    except Exception as e:
+        sys.stderr.write(f"[redmem] cheatsheet inject error: {e}\n")
+    return ""
 
 
 def handle_autopilot_init(data: dict) -> str:
@@ -292,14 +317,17 @@ def main():
         if not blocked:
             shield_result = handle_user_prompt_memory(data, shield_result)
             init_msg = handle_autopilot_init(data)
-            if init_msg:
-                # Append the autopilot init message (armed/refused/warned) to
-                # additionalContext so Claude and the user see it.
+            cheatsheet_msg = handle_cheatsheet_inject(data)
+            extras = [s for s in (cheatsheet_msg, init_msg) if s]
+            if extras:
+                # Append cheatsheet (post-compact) and/or autopilot init
+                # banner to additionalContext so Claude and the user see them.
                 shield_result.setdefault("hookSpecificOutput", {})
                 shield_result["hookSpecificOutput"]["hookEventName"] = "UserPromptSubmit"
                 existing_ctx = shield_result["hookSpecificOutput"].get("additionalContext", "")
+                joined = "\n\n".join(extras)
                 shield_result["hookSpecificOutput"]["additionalContext"] = (
-                    (existing_ctx + "\n\n" + init_msg) if existing_ctx else init_msg
+                    (existing_ctx + "\n\n" + joined) if existing_ctx else joined
                 )
 
         if shield_result:
