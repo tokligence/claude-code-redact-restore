@@ -41,15 +41,25 @@ def run_shield(input_json: str) -> dict:
     the dispatcher's own cwd / inherited env is wrong (Codex R2 [P2])."""
     shield_path = os.path.join(HOOKS_DIR, "redact-restore.py")
     try:
-        payload_cwd = ""
+        # Extract the project root from the payload. The shield's
+        # get_prompt_storage_dir() treats both `cwd` and `project_dir`
+        # as repo-root sources — propagate the same priority so the
+        # per-project pattern loader sees them in payload variants
+        # that only populate one (Codex R5 [P2]).
+        payload_root = ""
         try:
-            payload_cwd = (json.loads(input_json) or {}).get("cwd", "") or ""
+            payload = json.loads(input_json) or {}
+            for key in ("cwd", "project_dir"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    payload_root = value
+                    break
         except (json.JSONDecodeError, AttributeError):
             pass
 
         env = os.environ.copy()
-        if payload_cwd and os.path.isdir(payload_cwd):
-            env["CLAUDE_PROJECT_DIR"] = payload_cwd
+        if payload_root and os.path.isdir(payload_root):
+            env["CLAUDE_PROJECT_DIR"] = payload_root
 
         result = subprocess.run(
             [sys.executable, shield_path],
