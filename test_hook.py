@@ -2685,8 +2685,8 @@ class TestUserPromptSubmit:
     def test_go_restores_redacted_context(self, tmp_path):
         session_id = "go-restore-session"
         blocked_prompt = (
-            "帮我配置 git，在 /tmp/a 用 tony.seah@kleepay.ai，"
-            "在 /tmp/b 用 seahkweehwatony@gmail.com"
+            "帮我配置 git，在 /tmp/a 用 alice.test@example.ai，"
+            "在 /tmp/b 用 bob.test@gmail.com"
         )
         result, code, _ = self._run_prompt_hook(
             blocked_prompt, cwd=tmp_path, field="user_prompt", session_id=session_id
@@ -2725,8 +2725,8 @@ class TestUserPromptSubmit:
     def test_concurrent_sessions_use_distinct_prompt_artifacts(self, tmp_path):
         session_a = "session-a"
         session_b = "session-b"
-        prompt_a = "邮箱 seahkweehwatony@gmail.com"
-        prompt_b = "邮箱 tony.seah@kleepay.ai"
+        prompt_a = "邮箱 bob.test@gmail.com"
+        prompt_b = "邮箱 alice.test@example.ai"
 
         result_a, code_a, _ = self._run_prompt_hook(prompt_a, cwd=tmp_path, field="user_prompt", session_id=session_a)
         result_b, code_b, _ = self._run_prompt_hook(prompt_b, cwd=tmp_path, field="user_prompt", session_id=session_b)
@@ -2751,8 +2751,8 @@ class TestUserPromptSubmit:
 
     def test_new_blocked_prompt_replaces_only_same_session_state(self, tmp_path):
         session_id = "replace-session"
-        prompt_a = "first seahkweehwatony@gmail.com"
-        prompt_b = "second tony.seah@kleepay.ai"
+        prompt_a = "first bob.test@gmail.com"
+        prompt_b = "second alice.test@example.ai"
 
         self._run_prompt_hook(prompt_a, cwd=tmp_path, field="user_prompt", session_id=session_id)
         self._run_prompt_hook(prompt_b, cwd=tmp_path, field="user_prompt", session_id=session_id)
@@ -2769,8 +2769,8 @@ class TestUserPromptSubmit:
 
     def test_parallel_subagents_same_session_use_distinct_state(self, tmp_path):
         session_id = "shared-session"
-        prompt_a = "alpha seahkweehwatony@gmail.com"
-        prompt_b = "beta tony.seah@kleepay.ai"
+        prompt_a = "alpha bob.test@gmail.com"
+        prompt_b = "beta alice.test@example.ai"
 
         extra_a = {"agent_id": "subagent-a", "agent_type": "worker"}
         extra_b = {"agent_id": "subagent-b", "agent_type": "worker"}
@@ -2804,10 +2804,10 @@ class TestUserPromptSubmit:
         session_b = "session-b"
 
         result_a, code_a, _ = self._run_prompt_hook(
-            "alpha seahkweehwatony@gmail.com", cwd=tmp_path, field="user_prompt", session_id=session_a
+            "alpha bob.test@gmail.com", cwd=tmp_path, field="user_prompt", session_id=session_a
         )
         result_b, code_b, _ = self._run_prompt_hook(
-            "beta tony.seah@kleepay.ai", cwd=tmp_path, field="user_prompt", session_id=session_b
+            "beta alice.test@example.ai", cwd=tmp_path, field="user_prompt", session_id=session_b
         )
         assert code_a == 0 and result_a is not None and result_a["decision"] == "block"
         assert code_b == 0 and result_b is not None and result_b["decision"] == "block"
