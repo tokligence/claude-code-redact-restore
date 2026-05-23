@@ -314,6 +314,26 @@ def main():
         if shield_result.get("decision") == "block":
             blocked = True
 
+        # Secret-ops guard — handle "go-secret" / "pass-secret N" / "pass-secret off"
+        # keywords that approve a queued PreToolUse Bash command. Runs even if
+        # shield blocked because the keyword phrases don't contain secrets and
+        # the user might be unblocking unrelated state.
+        try:
+            from secret_ops_guard import handle_user_prompt as secret_ops_user_prompt
+            prompt_text = data.get("prompt") or data.get("user_prompt") or ""
+            so_result = secret_ops_user_prompt(data, prompt_text)
+            if so_result:
+                so_ctx = so_result.get("hookSpecificOutput", {}).get("additionalContext", "")
+                if so_ctx:
+                    shield_result.setdefault("hookSpecificOutput", {})
+                    shield_result["hookSpecificOutput"]["hookEventName"] = "UserPromptSubmit"
+                    existing_ctx = shield_result["hookSpecificOutput"].get("additionalContext", "")
+                    shield_result["hookSpecificOutput"]["additionalContext"] = (
+                        (existing_ctx + "\n\n" + so_ctx) if existing_ctx else so_ctx
+                    )
+        except Exception:
+            pass
+
         if not blocked:
             shield_result = handle_user_prompt_memory(data, shield_result)
             init_msg = handle_autopilot_init(data)
@@ -339,7 +359,7 @@ def main():
         handle_stop(data)
         sys.exit(0)
 
-    # ── PreToolUse: shield secret-restore, then autopilot bash guard ──
+    # ── PreToolUse: shield secret-restore, secret-ops guard, then autopilot bash guard ──
     if event == "PreToolUse":
         shield_result = run_shield(raw_input)
 
@@ -352,6 +372,21 @@ def main():
             if shield_result:
                 print(json.dumps(shield_result))
             sys.exit(0)
+
+        # Secret-ops guard — soft-block PreToolUse Bash on commands that
+        # would print prod-grade secrets (aws secretsmanager get-secret-value,
+        # SSM SecureString reads, KMS decrypt, RDS master password modify).
+        # User authorizes via "go-secret" or "pass-secret N" in the next
+        # UserPromptSubmit (handled below).
+        try:
+            from secret_ops_guard import check as secret_ops_check
+            secret_ops_resp = secret_ops_check(data)
+            if secret_ops_resp:
+                print(json.dumps(secret_ops_resp))
+                sys.exit(0)
+        except Exception:
+            # Never let a guard bug brick the whole hook chain.
+            pass
 
         # Image-original sentinel intercept (runs BEFORE autopilot bash
         # guard — we want CC to be able to request originals even under

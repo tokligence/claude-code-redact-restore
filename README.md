@@ -82,6 +82,41 @@ No configuration needed. If you ever want to disable native recap:
 - Housekeeping files (`.tmp_secrets.*`) auto-registered in `.git/info/exclude`
   on first create — never leak into `git status` or `.gitignore`
 
+#### Extending with your own patterns
+
+Two locations are searched. Both files share the same surface
+(`CUSTOM_SECRET_PATTERNS`, `CUSTOM_BLOCKED_FILES`); entries from
+both are appended to the builtin set.
+
+| Scope | Path | Use when |
+|---|---|---|
+| **Global** (per-user, machine-wide) | `~/.claude/hooks/custom-patterns.py` | Secrets that follow you across every project (personal API keys, your company's vendor tokens). Never committed. |
+| **Per-project** (repo-scoped) | `<repo>/.claude/custom-patterns.py` | Vendor / DB / signing patterns specific to one codebase. **Committed with the repo** so teammates + future-you get the same protection. |
+
+Per-project loading uses `$CWD` at hook invocation — Claude Code's
+working directory is the repo root, so each session auto-picks up its
+repo's pattern file.
+
+Example `.claude/custom-patterns.py`:
+
+```python
+CUSTOM_SECRET_PATTERNS = [
+    # Internal vendor token: matches both env-var assignment and JSON field
+    ("ACMECO_TOKEN", r"(?i)acme(?:co)?[_-]?(?:api[_-]?)?token['\"\s]*[:=]\s*['\"]?[A-Za-z0-9_-]{20,}['\"]?"),
+    # Production DB password env (catches printed env dump)
+    ("PROD_DB_PASSWORD", r"(?i)PROD[_-]?DB[_-]?(?:PASSWORD|PWD)['\"\s]*[:=]\s*['\"]?\S{8,}['\"]?"),
+]
+CUSTOM_BLOCKED_FILES = [
+    "internal-keystore.json",
+]
+```
+
+**When to update**: every time a new vendor / DB / signing service joins
+the codebase. The pattern should match the secret **in its typical leak
+context** (env-var assignment, JSON field, log line) — not just the bare
+value. Verify by piping a synthetic example through the hook and
+confirming a `{{NAME_hash}}` placeholder appears in the redacted output.
+
 ### Tool-availability reminder (post-compact)
 
 Claude Code's auto-compact compresses earlier turns into a lossy summary.

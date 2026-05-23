@@ -126,18 +126,42 @@ if not _patterns_loaded:
     ]
 
 # ── Load custom patterns (never overwritten by install.sh) ───────────────
-try:
-    import importlib.util
-    custom_path = os.path.join(_SCRIPT_DIR, "custom-patterns.py")
-    if os.path.exists(custom_path):
-        spec = importlib.util.spec_from_file_location("custom_patterns", custom_path)
+#
+# Two locations searched, in order:
+#   1. Global       — _SCRIPT_DIR/custom-patterns.py  (~/.claude/hooks/)
+#                     Shared across every project on this machine.
+#   2. Per-project  — $CWD/.claude/custom-patterns.py
+#                     A repo can ship its own patterns alongside its code
+#                     so they travel with the project (committed + reviewed).
+#                     Loaded second so per-project patterns can extend
+#                     (not override) the global set.
+#
+# Both files share the same module surface:
+#   CUSTOM_SECRET_PATTERNS = [("NAME", r"regex"), ...]
+#   CUSTOM_BLOCKED_FILES   = ["sensitive.yaml", ...]
+def _load_custom_patterns_from(path):
+    try:
+        if not path or not os.path.exists(path):
+            return
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"custom_patterns_{abs(hash(path))}", path
+        )
         custom_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(custom_mod)
         if hasattr(custom_mod, "CUSTOM_SECRET_PATTERNS"):
             SECRET_PATTERNS.extend(custom_mod.CUSTOM_SECRET_PATTERNS)
         if hasattr(custom_mod, "CUSTOM_BLOCKED_FILES"):
             BLOCKED_FILES.extend(custom_mod.CUSTOM_BLOCKED_FILES)
-except Exception:
+    except Exception:
+        # Never let a malformed user file crash the hook.
+        pass
+
+
+_load_custom_patterns_from(os.path.join(_SCRIPT_DIR, "custom-patterns.py"))
+try:
+    _load_custom_patterns_from(os.path.join(os.getcwd(), ".claude", "custom-patterns.py"))
+except OSError:
     pass
 
 # ── Compile patterns once ────────────────────────────────────────────────

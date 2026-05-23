@@ -336,6 +336,19 @@ PATTERN_TEST_CASES = [
     ("JWT_SECRET", 'jwt_secret = "' + "A" * 32 + '"'),
 
     # ================================================================
+    # DATABASE / CACHE CONNECTION STRINGS
+    # ================================================================
+    ("POSTGRES_URI_WITH_PWD", "postgres://alice:Sup3rSecretPwd123@db.example.com:5432/mydb"),
+    ("MYSQL_URI_WITH_PWD",    "mysql://alice:Sup3rSecretPwd123@db.example.com:3306/mydb"),
+    ("MONGODB_URI_WITH_PWD",  "mongodb+srv://alice:Sup3rSecretPwd123@cluster.example.com/mydb"),
+    ("REDIS_URI_WITH_AUTH",   "rediss://default:Sup3rSecretAuthToken@cache.example.com:6379/0"),
+
+    # ================================================================
+    # KYC / IDENTITY PROVIDER TOKENS
+    # ================================================================
+    ("SUMSUB_TOKEN", "sbx:abcd1234.SUMSUB_TEST_TOKEN_VALUE"),
+
+    # ================================================================
     # GENERIC PATTERNS
     # ================================================================
     ("GENERIC_API_KEY", 'api_key = "AAAAAAAAAABBBBBBBBBBCCCCCCCCCC"'),

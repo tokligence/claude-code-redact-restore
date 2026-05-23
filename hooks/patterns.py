@@ -486,6 +486,24 @@ SECRET_PATTERNS = [
     ("JWT_SECRET", r'(?i)jwt[_-]?secret["\']?\s*[:=]\s*["\']?[A-Za-z0-9+/=_-]{24,}["\']?'),
 
     # ================================================================
+    # DATABASE / CACHE CONNECTION STRINGS (with embedded password)
+    # ================================================================
+
+    # Postgres / MySQL / Mongo / Redis URIs with inline credentials —
+    # common in env files, DB row dumps, log output, error tracebacks.
+    ("POSTGRES_URI_WITH_PWD", r'postgres(?:ql)?://[^:\s]+:[^@\s]{4,}@[^/\s]+'),
+    ("MYSQL_URI_WITH_PWD",    r'mysql://[^:\s]+:[^@\s]{4,}@[^/\s]+'),
+    ("MONGODB_URI_WITH_PWD",  r'mongodb(?:\+srv)?://[^:\s]+:[^@\s]{4,}@[^/\s]+'),
+    ("REDIS_URI_WITH_AUTH",   r'rediss?://[^:\s]*:[^@\s]{4,}@[^/\s]+'),
+
+    # ================================================================
+    # KYC / IDENTITY PROVIDER TOKENS
+    # ================================================================
+
+    # Sumsub KYC token — `sbx:` sandbox or `prd:` production prefix.
+    ("SUMSUB_TOKEN", r'(?:sbx|prd):[a-zA-Z0-9_-]+\.[a-zA-Z0-9]+'),
+
+    # ================================================================
     # PII / PERSONAL DATA
     # ================================================================
 
