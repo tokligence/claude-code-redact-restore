@@ -411,5 +411,86 @@ class TestEndToEndFlow(unittest.TestCase):
         _clear_state(sess_b)
 
 
+class TestAgentScopeIsolation(unittest.TestCase):
+    """Codex R3 [P1] — different agent_type values must produce
+    different state keys so subagents don't share approval state."""
+
+    def test_agent_type_isolates_state_key(self):
+        p_main = {"session_id": "s1", "agent_type": "main-thread"}
+        p_sub = {"session_id": "s1", "agent_type": "code-reviewer"}
+        self.assertNotEqual(guard._state_key(p_main), guard._state_key(p_sub))
+
+    def test_agent_id_isolates_state_key(self):
+        p1 = {"session_id": "s1", "agent_id": "alpha"}
+        p2 = {"session_id": "s1", "agent_id": "beta"}
+        self.assertNotEqual(guard._state_key(p1), guard._state_key(p2))
+
+    def test_no_agent_info_uses_main_sentinel(self):
+        p = {"session_id": "s1"}
+        self.assertEqual(guard._state_key(p), "s1::main")
+
+    def test_go_secret_does_not_leak_across_agent_types(self):
+        """Approve a command for agent_type='alpha'; agent_type='beta'
+        in the same session must still be blocked."""
+        cmd = "aws kms decrypt --ciphertext-blob foo"
+
+        # Two payloads — same session, different agent_type
+        p_alpha = {"session_id": "agent-iso-sess", "agent_type": "alpha",
+                   "tool_name": "Bash", "tool_input": {"command": cmd}}
+        p_beta = {"session_id": "agent-iso-sess", "agent_type": "beta",
+                  "tool_name": "Bash", "tool_input": {"command": cmd}}
+
+        # Clear any state
+        for p in (p_alpha, p_beta):
+            try:
+                os.remove(guard._state_path(guard._state_key(p)))
+            except FileNotFoundError:
+                pass
+
+        # Queue + approve in alpha
+        guard.check(p_alpha)
+        guard.handle_user_prompt(
+            {**p_alpha, "prompt": "go-secret"}, "go-secret"
+        )
+
+        # Beta with same session sees no approval — still denied
+        resp = guard.check(p_beta)
+        self.assertIsNotNone(resp)
+        self.assertEqual(
+            resp["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+        # Cleanup
+        for p in (p_alpha, p_beta):
+            try:
+                os.remove(guard._state_path(guard._state_key(p)))
+            except FileNotFoundError:
+                pass
+
+
+class TestFailClosed(unittest.TestCase):
+    """Codex R3 [P2] — when state I/O fails (e.g. unwritable tempdir),
+    the guard must DENY the dangerous command, not silently let it
+    through via the dispatcher's outer except-Exception."""
+
+    def test_check_fails_closed_when_state_unsavable(self):
+        # Patch _save_state to raise — simulate unwritable tempdir
+        original = guard._save_state
+        guard._save_state = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("Read-only file system")
+        )
+        try:
+            payload = _payload("fc-test", "aws kms decrypt --ciphertext-blob x")
+            resp = guard.check(payload)
+            self.assertIsNotNone(resp)
+            self.assertEqual(
+                resp["hookSpecificOutput"]["permissionDecision"], "deny"
+            )
+            self.assertIn("fail-closed", resp["hookSpecificOutput"]["permissionDecisionReason"])
+        finally:
+            guard._save_state = original
+            _clear_state("fc-test")
+
+
 if __name__ == "__main__":
     unittest.main()

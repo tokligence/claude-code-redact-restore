@@ -36,15 +36,21 @@ _STATE_PREFIX = ".claude-secret-ops-"
 
 
 def _session_id(payload: dict) -> str:
-    return payload.get("session_id") or payload.get("sessionId") or "default"
+    value = payload.get("session_id")
+    if isinstance(value, str) and value:
+        return value
+    return "default"
 
 
 def _agent_scope(payload: dict) -> str:
-    return (
-        payload.get("agent_scope")
-        or payload.get("agent_id")
-        or payload.get("transcript_path", "main")
-    )
+    """Mirror redact-restore's get_agent_scope() — checks the same payload
+    keys in the same priority so parallel subagents are isolated identically
+    across both features (Codex R3 [P1])."""
+    for key in ("agent_id", "agent_type", "transcript_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "main"
 
 
 def _state_key(payload: dict) -> str:
@@ -65,6 +71,9 @@ def _load_state(state_key: str) -> dict:
 
 
 def _save_state(state_key: str, state: dict) -> None:
+    """Raises on OSError / OS-permission errors. Callers (in check() / the
+    UserPromptSubmit handler) wrap I/O in try/except and fail-closed on
+    error so a non-writable tempdir doesn't silently disable the guard."""
     fd = os.open(_state_path(state_key), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(state, f)
@@ -124,6 +133,30 @@ def _cmd_fingerprint(cmd: str) -> str:
     return hashlib.sha256(cmd.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _fail_closed(pattern_name: str, exc: Exception) -> dict:
+    """
+    Return a permission-deny payload when the guard can't persist its
+    approval state (e.g. tempdir unavailable in a locked sandbox).
+    Failing CLOSED here is critical — Codex R3 [P2] caught that a
+    silent `except Exception: pass` upstream would otherwise let the
+    dangerous command through.
+    """
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": (
+                f"🛡️  redmem secret-ops guard: refusing dangerous command "
+                f"(pattern {pattern_name}) because the guard cannot persist "
+                f"approval state. This is a fail-closed safety stop.\n\n"
+                f"Cause: {type(exc).__name__}: {exc}\n\n"
+                "Likely fix: ensure $TMPDIR / /tmp is writable, or set TMPDIR "
+                "to a writable directory before launching Claude Code."
+            ),
+        }
+    }
+
+
 def check(payload: dict) -> Optional[dict]:
     """
     Inspect a PreToolUse payload. Return a hookSpecificOutput dict to deny,
@@ -139,8 +172,16 @@ def check(payload: dict) -> Optional[dict]:
     if not pattern_name:
         return None
 
-    state_key = _state_key(payload)
-    state = _load_state(state_key)
+    # Wrap state I/O in a single try block: any failure here means we
+    # can't reliably track approval, so we fail CLOSED (deny). The
+    # dispatcher's outer `except Exception: pass` would otherwise let
+    # the dangerous command through silently.
+    try:
+        state_key = _state_key(payload)
+        state = _load_state(state_key)
+    except Exception as e:
+        return _fail_closed(pattern_name, e)
+
     remaining = state.get("secret_ops_bypass_remaining", 0)
     cmd_fp = _cmd_fingerprint(cmd)
 
@@ -167,7 +208,10 @@ def check(payload: dict) -> Optional[dict]:
                 "session_id": _session_id(payload),
                 "fingerprint": cmd_fp,
             }
-            _save_state(state_key, state)
+            try:
+                _save_state(state_key, state)
+            except Exception as e:
+                return _fail_closed(pattern_name, e)
             reason = (
                 "🛡️  redmem secret-ops guard: the queued approval is bound to a "
                 "DIFFERENT command than the one the AI is now trying to run. "
@@ -190,7 +234,10 @@ def check(payload: dict) -> Optional[dict]:
         # One-shot binding consumed; clear the binding so a fresh
         # `go-secret` is required for the next command.
         state.pop("secret_ops_bound_fingerprint", None)
-        _save_state(state_key, state)
+        try:
+            _save_state(state_key, state)
+        except Exception as e:
+            return _fail_closed(pattern_name, e)
         return None
 
     # Block — save the pending command + its fingerprint so the
@@ -201,7 +248,10 @@ def check(payload: dict) -> Optional[dict]:
         "session_id": _session_id(payload),
         "fingerprint": cmd_fp,
     }
-    _save_state(state_key, state)
+    try:
+        _save_state(state_key, state)
+    except Exception as e:
+        return _fail_closed(pattern_name, e)
 
     reason = (
         f"🛡️  redmem secret-ops guard: this command reads a production-grade "

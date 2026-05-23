@@ -184,29 +184,71 @@ def _load_custom_patterns_from(path):
 _load_custom_patterns_from(os.path.join(_SCRIPT_DIR, "custom-patterns.py"))
 
 
+_PROJECT_MARKERS = (
+    os.path.join(".claude", "custom-patterns.py"),
+    ".git",
+    ".hg",
+)
+
+
+def _walk_up_for_marker(start_dir):
+    """Walk from `start_dir` upward (toward /) looking for any
+    `_PROJECT_MARKERS` entry. Returns the directory containing the first
+    match, or None if none found. Stops at filesystem root.
+
+    Codex R3 [P1]: a user invoking Claude from `<repo>/src/...` should
+    still trigger the repo-root's `.claude/custom-patterns.py`. Without
+    this walk-up, the loader misses anything not directly in the cwd.
+    """
+    if not start_dir:
+        return None
+    try:
+        d = os.path.abspath(start_dir)
+    except OSError:
+        return None
+    seen = set()
+    while d and d not in seen and d != os.path.dirname(d):
+        seen.add(d)
+        for marker in _PROJECT_MARKERS:
+            if os.path.exists(os.path.join(d, marker)):
+                return d
+        d = os.path.dirname(d)
+    return None
+
+
 def _resolve_project_dir(payload_cwd=None):
     """
     Find the project root for loading per-project custom-patterns.py.
 
-    Priority:
+    For each candidate start dir, walk upward looking for either
+    `.claude/custom-patterns.py` directly OR a VCS marker (`.git`,
+    `.hg`). Falls through to next candidate if no marker found.
+
+    Candidate priority:
       1. Explicit `payload_cwd` (hook payload's `cwd` field) — most
          authoritative when available (Codex R2 [P2]).
       2. $CLAUDE_PROJECT_DIR — Claude Code sets this in the hook env.
       3. `os.getcwd()` — last-resort fallback.
 
-    Returns None if no candidate is a valid directory.
+    Returns None if no candidate yields a marker.
     """
-    if payload_cwd and os.path.isdir(payload_cwd):
-        return payload_cwd
+    candidates = []
+    if payload_cwd:
+        candidates.append(payload_cwd)
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if env_dir and os.path.isdir(env_dir):
-        return env_dir
+    if env_dir:
+        candidates.append(env_dir)
     try:
-        cwd = os.getcwd()
-        if os.path.isdir(cwd):
-            return cwd
+        candidates.append(os.getcwd())
     except OSError:
-        return None
+        pass
+
+    for c in candidates:
+        if not c or not os.path.isdir(c):
+            continue
+        root = _walk_up_for_marker(c)
+        if root:
+            return root
     return None
 
 
