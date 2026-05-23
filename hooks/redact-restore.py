@@ -126,21 +126,152 @@ if not _patterns_loaded:
     ]
 
 # ── Load custom patterns (never overwritten by install.sh) ───────────────
-try:
-    import importlib.util
-    custom_path = os.path.join(_SCRIPT_DIR, "custom-patterns.py")
-    if os.path.exists(custom_path):
-        spec = importlib.util.spec_from_file_location("custom_patterns", custom_path)
+#
+# Two locations searched, in order:
+#   1. Global       — _SCRIPT_DIR/custom-patterns.py  (~/.claude/hooks/)
+#                     Shared across every project on this machine.
+#   2. Per-project  — $CWD/.claude/custom-patterns.py
+#                     A repo can ship its own patterns alongside its code
+#                     so they travel with the project (committed + reviewed).
+#                     Loaded second so per-project patterns can extend
+#                     (not override) the global set.
+#
+# Both files share the same module surface:
+#   CUSTOM_SECRET_PATTERNS = [("NAME", r"regex"), ...]
+#   CUSTOM_BLOCKED_FILES   = ["sensitive.yaml", ...]
+_LOADED_PATTERN_PATHS = set()
+
+
+def _load_custom_patterns_from(path):
+    """Idempotent — won't double-load the same file path.
+
+    Also compiles any new regex and appends to COMPILED_PATTERNS so a
+    later `_load_project_custom_patterns(payload_cwd)` from the
+    dispatcher actually adds usable patterns (not just SECRET_PATTERNS
+    list entries that nobody compiles)."""
+    try:
+        if not path or not os.path.exists(path):
+            return
+        abspath = os.path.abspath(path)
+        if abspath in _LOADED_PATTERN_PATHS:
+            return
+        _LOADED_PATTERN_PATHS.add(abspath)
+
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            f"custom_patterns_{abs(hash(abspath))}", abspath
+        )
         custom_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(custom_mod)
         if hasattr(custom_mod, "CUSTOM_SECRET_PATTERNS"):
-            SECRET_PATTERNS.extend(custom_mod.CUSTOM_SECRET_PATTERNS)
+            for name, regex in custom_mod.CUSTOM_SECRET_PATTERNS:
+                SECRET_PATTERNS.append((name, regex))
+                # Compile incrementally if COMPILED_PATTERNS already exists
+                # (i.e. we're past initial module load and being called from
+                # dispatcher with payload cwd).
+                if "COMPILED_PATTERNS" in globals():
+                    try:
+                        COMPILED_PATTERNS.append((name, re.compile(regex)))
+                    except re.error:
+                        pass
         if hasattr(custom_mod, "CUSTOM_BLOCKED_FILES"):
             BLOCKED_FILES.extend(custom_mod.CUSTOM_BLOCKED_FILES)
-except Exception:
-    pass
+    except Exception:
+        # Never let a malformed user file crash the hook.
+        pass
+
+
+_load_custom_patterns_from(os.path.join(_SCRIPT_DIR, "custom-patterns.py"))
+
+
+_PROJECT_MARKERS = (
+    os.path.join(".claude", "custom-patterns.py"),
+    ".git",
+    ".hg",
+)
+
+
+def _walk_up_for_marker(start_dir):
+    """Walk from `start_dir` upward (toward /) looking for any
+    `_PROJECT_MARKERS` entry. Returns the directory containing the first
+    match, or None if none found. Stops at filesystem root.
+
+    Codex R3 [P1]: a user invoking Claude from `<repo>/src/...` should
+    still trigger the repo-root's `.claude/custom-patterns.py`. Without
+    this walk-up, the loader misses anything not directly in the cwd.
+    """
+    if not start_dir:
+        return None
+    try:
+        d = os.path.abspath(start_dir)
+    except OSError:
+        return None
+    seen = set()
+    while d and d not in seen and d != os.path.dirname(d):
+        seen.add(d)
+        for marker in _PROJECT_MARKERS:
+            if os.path.exists(os.path.join(d, marker)):
+                return d
+        d = os.path.dirname(d)
+    return None
+
+
+def _resolve_project_dir(payload_cwd=None):
+    """
+    Find the project root for loading per-project custom-patterns.py.
+
+    For each candidate start dir, walk upward looking for either
+    `.claude/custom-patterns.py` directly OR a VCS marker (`.git`,
+    `.hg`). Falls through to next candidate if no marker found.
+
+    Candidate priority:
+      1. Explicit `payload_cwd` (hook payload's `cwd` field) — most
+         authoritative when available (Codex R2 [P2]).
+      2. $CLAUDE_PROJECT_DIR — Claude Code sets this in the hook env.
+      3. `os.getcwd()` — last-resort fallback.
+
+    Returns None if no candidate yields a marker.
+    """
+    candidates = []
+    if payload_cwd:
+        candidates.append(payload_cwd)
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_dir:
+        candidates.append(env_dir)
+    try:
+        candidates.append(os.getcwd())
+    except OSError:
+        pass
+
+    for c in candidates:
+        if not c or not os.path.isdir(c):
+            continue
+        root = _walk_up_for_marker(c)
+        if root:
+            return root
+    return None
+
+
+def _load_project_custom_patterns(payload_cwd=None):
+    """
+    Load (or re-load, idempotently) per-project custom patterns.
+
+    The dispatcher should call this with `data.get("cwd")` early in each
+    hook event so the authoritative payload-cwd path is honoured even if
+    the interpreter's getcwd() and env are wrong.
+    """
+    target_dir = _resolve_project_dir(payload_cwd)
+    if not target_dir:
+        return
+    _load_custom_patterns_from(os.path.join(target_dir, ".claude", "custom-patterns.py"))
+
+
+_load_project_custom_patterns()
 
 # ── Compile patterns once ────────────────────────────────────────────────
+# (Subsequent `_load_project_custom_patterns(payload_cwd)` calls from the
+# dispatcher will compile new patterns incrementally in-place — see
+# `_load_custom_patterns_from` above.)
 COMPILED_PATTERNS = []
 for name, regex in SECRET_PATTERNS:
     try:

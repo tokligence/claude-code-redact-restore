@@ -33,15 +33,41 @@ AUTOPILOT_INIT_RE = re.compile(r"<!--\s*autopilot-init:")
 
 
 def run_shield(input_json: str) -> dict:
-    """Run the existing redact-restore.py and capture its output."""
+    """Run the existing redact-restore.py and capture its output.
+
+    Forwards the hook payload's `cwd` field via `CLAUDE_PROJECT_DIR` env
+    var so the subprocess's module-level per-project pattern loader
+    (in redact-restore.py) sees the authoritative project root, even if
+    the dispatcher's own cwd / inherited env is wrong (Codex R2 [P2])."""
     shield_path = os.path.join(HOOKS_DIR, "redact-restore.py")
     try:
+        # Extract the project root from the payload. The shield's
+        # get_prompt_storage_dir() treats both `cwd` and `project_dir`
+        # as repo-root sources — propagate the same priority so the
+        # per-project pattern loader sees them in payload variants
+        # that only populate one (Codex R5 [P2]).
+        payload_root = ""
+        try:
+            payload = json.loads(input_json) or {}
+            for key in ("cwd", "project_dir"):
+                value = payload.get(key)
+                if isinstance(value, str) and value:
+                    payload_root = value
+                    break
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        env = os.environ.copy()
+        if payload_root and os.path.isdir(payload_root):
+            env["CLAUDE_PROJECT_DIR"] = payload_root
+
         result = subprocess.run(
             [sys.executable, shield_path],
             input=input_json,
             capture_output=True,
             text=True,
             timeout=25,
+            env=env,
         )
         if result.stdout.strip():
             return json.loads(result.stdout.strip())
@@ -293,6 +319,13 @@ def main():
 
     event = data.get("hook_event_name", "")
 
+    # NOTE on per-project patterns: redact-restore is invoked as a
+    # subprocess (see run_shield), so its module-level pattern loader
+    # runs in a separate process and shares nothing with us. We forward
+    # the payload's `cwd` via the CLAUDE_PROJECT_DIR env var inside
+    # run_shield() — that's what the subprocess actually reads (Codex
+    # R2 [P2]).
+
     # ── PreCompact: archive turns (memory only, shield not involved) ──
     if event == "PreCompact":
         handle_pre_compact(data)
@@ -313,6 +346,42 @@ def main():
         blocked = shield_result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
         if shield_result.get("decision") == "block":
             blocked = True
+
+        # Secret-ops guard — handle "go-secret" / "pass-secret N" / "pass-secret off"
+        # keywords that approve a queued PreToolUse Bash command. Runs even if
+        # shield blocked because the keyword phrases don't contain secrets and
+        # the user might be unblocking unrelated state.
+        #
+        # Codex R4 [P2]: read prompt text from BOTH top-level and nested
+        # `data` payload (some Claude Code variants wrap it). Mirror
+        # redact-restore.get_prompt_text() exactly.
+        def _extract_prompt_text(d):
+            candidates = [d]
+            nested = d.get("data") if isinstance(d, dict) else None
+            if isinstance(nested, dict):
+                candidates.append(nested)
+            for c in candidates:
+                for key in ("user_prompt", "prompt", "message"):
+                    v = c.get(key)
+                    if isinstance(v, str) and v:
+                        return v
+            return ""
+
+        try:
+            from secret_ops_guard import handle_user_prompt as secret_ops_user_prompt
+            prompt_text = _extract_prompt_text(data)
+            so_result = secret_ops_user_prompt(data, prompt_text)
+            if so_result:
+                so_ctx = so_result.get("hookSpecificOutput", {}).get("additionalContext", "")
+                if so_ctx:
+                    shield_result.setdefault("hookSpecificOutput", {})
+                    shield_result["hookSpecificOutput"]["hookEventName"] = "UserPromptSubmit"
+                    existing_ctx = shield_result["hookSpecificOutput"].get("additionalContext", "")
+                    shield_result["hookSpecificOutput"]["additionalContext"] = (
+                        (existing_ctx + "\n\n" + so_ctx) if existing_ctx else so_ctx
+                    )
+        except Exception:
+            pass
 
         if not blocked:
             shield_result = handle_user_prompt_memory(data, shield_result)
@@ -339,7 +408,7 @@ def main():
         handle_stop(data)
         sys.exit(0)
 
-    # ── PreToolUse: shield secret-restore, then autopilot bash guard ──
+    # ── PreToolUse: shield secret-restore, secret-ops guard, then autopilot bash guard ──
     if event == "PreToolUse":
         shield_result = run_shield(raw_input)
 
@@ -352,6 +421,21 @@ def main():
             if shield_result:
                 print(json.dumps(shield_result))
             sys.exit(0)
+
+        # Secret-ops guard — soft-block PreToolUse Bash on commands that
+        # would print prod-grade secrets (aws secretsmanager get-secret-value,
+        # SSM SecureString reads, KMS decrypt, RDS master password modify).
+        # User authorizes via "go-secret" or "pass-secret N" in the next
+        # UserPromptSubmit (handled below).
+        try:
+            from secret_ops_guard import check as secret_ops_check
+            secret_ops_resp = secret_ops_check(data)
+            if secret_ops_resp:
+                print(json.dumps(secret_ops_resp))
+                sys.exit(0)
+        except Exception:
+            # Never let a guard bug brick the whole hook chain.
+            pass
 
         # Image-original sentinel intercept (runs BEFORE autopilot bash
         # guard — we want CC to be able to request originals even under
