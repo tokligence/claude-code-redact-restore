@@ -10,6 +10,7 @@ allows the user to authorize via "go-secret" / "pass-secret N" /
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -470,42 +471,50 @@ class TestAgentScopeIsolation(unittest.TestCase):
 
 class TestConcurrencyAtomicBypass(unittest.TestCase):
     """Codex R4 [P1] — bypass consumption must be atomic under
-    parallel PreToolUse hooks. Two threads racing against
-    `secret_ops_bypass_remaining=1` must NOT both succeed."""
+    parallel PreToolUse hooks.
+
+    Codex R6 [P3]: fcntl.flock is process-scoped on POSIX, so same-process
+    threads do NOT exercise the lock. This test spawns 8 separate
+    subprocesses (modelling concurrent hook processes) to actually
+    validate the production locking model."""
 
     def test_parallel_check_consumes_only_one_bypass(self):
-        import threading
+        import concurrent.futures
+
         session = "race-test-" + os.urandom(4).hex()
         key = f"{session}::main"
         _clear_state(session)
 
-        # Seed state with a single multi-shot bypass (no fingerprint
-        # binding — so any matching command can consume it).
+        # Seed state with a single multi-shot bypass.
         guard._save_state(key, {"secret_ops_bypass_remaining": 1})
 
         cmd = "aws kms decrypt --ciphertext-blob foo"
-        results = []
-        barrier = threading.Barrier(8)
+        payload = _payload(session, cmd)
 
-        def hammer():
-            barrier.wait()
-            r = guard.check(_payload(session, cmd))
-            results.append(r)
+        def run_one_subprocess(_ignored):
+            # Each call spawns a fresh Python process running the hook's
+            # __main__ block on the same session state file. fcntl.flock
+            # in those processes is what serializes them.
+            r = subprocess.run(
+                [sys.executable, str(_HOOK_PATH)],
+                input=json.dumps(payload),
+                capture_output=True, text=True, timeout=15,
+            )
+            return r.stdout.strip()
 
-        threads = [threading.Thread(target=hammer) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            outputs = list(pool.map(run_one_subprocess, range(8)))
 
-        # Exactly ONE caller should see None (allowed); the rest
-        # should see a deny payload.
-        allowed = sum(1 for r in results if r is None)
-        denied = sum(1 for r in results if r is not None)
+        # Exactly ONE child should produce empty stdout (= allow).
+        # The other seven should produce a JSON deny payload.
+        allowed = sum(1 for o in outputs if o == "")
+        denied = sum(1 for o in outputs if o and json.loads(o).get(
+            "hookSpecificOutput", {}
+        ).get("permissionDecision") == "deny")
         self.assertEqual(
             allowed, 1,
             f"expected 1 allow, got {allowed} (denied={denied}). "
-            f"Race condition leaked extra bypasses."
+            f"flock race leaked extra bypasses across processes."
         )
         self.assertEqual(denied, 7)
 
@@ -523,8 +532,6 @@ class TestWrappedPayloadPromptExtract(unittest.TestCase):
     def test_main_block_handles_nested_data_user_prompt(self):
         """Direct subprocess call with a wrapped payload should still
         recognize 'go-secret' and ack the queued command."""
-        import subprocess
-
         session = "wrap-test-" + os.urandom(4).hex()
         _clear_state(session)
 
@@ -538,7 +545,7 @@ class TestWrappedPayloadPromptExtract(unittest.TestCase):
             "data": {"message": "go-secret"},
         }
         result = subprocess.run(
-            ["python3", "/Users/tonyseah/personal/redmem/hooks/secret_ops_guard.py"],
+            [sys.executable, str(_HOOK_PATH)],
             input=json.dumps(wrapped),
             capture_output=True, text=True, timeout=15,
         )
