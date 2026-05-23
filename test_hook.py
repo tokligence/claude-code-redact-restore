@@ -2322,6 +2322,47 @@ class TestSecretManagerBashWrapping:
 
     MASK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hooks", "mask-output.py")
 
+    def test_posttooluse_does_not_emit_pretooluse_output(self, sid):
+        """Regression: Claude Code sends PostToolUse Bash events with
+        `tool_response` (not the legacy `tool_result`). Prior to the
+        2026-05-24 fix, `is_post_hook` only checked `tool_result`, so
+        PostToolUse events for `aws secretsmanager get-secret-value`
+        fell through to the PreToolUse Bash branch, which emitted
+        `permissionDecision=allow` with `hookEventName=PreToolUse` —
+        causing Claude Code to log:
+          'Hook returned incorrect event name: expected PostToolUse
+           but got PreToolUse'.
+
+        The fix: detect PostToolUse from `hook_event_name` OR
+        `tool_response`, not just `tool_result`. PostToolUse events
+        must NOT produce a PreToolUse-shaped output.
+        """
+        import json as _json
+        import subprocess as _sp
+        import sys as _sys
+
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "session_id": sid,
+            "tool_name": "Bash",
+            "tool_input": {"command": "aws secretsmanager get-secret-value --secret-id foo"},
+            "tool_response": {"stdout": "{\"SecretString\":\"sk-test\"}", "stderr": "", "exit_code": 0},
+        }
+        r = _sp.run(
+            [_sys.executable, HOOK_SCRIPT],
+            input=_json.dumps(payload),
+            capture_output=True, text=True, timeout=10,
+        )
+        assert r.returncode == 0
+        # Output may be empty (clean) OR contain a PostToolUse-shaped
+        # additionalContext — but it must NEVER advertise PreToolUse.
+        if r.stdout.strip():
+            data = _json.loads(r.stdout)
+            event = data.get("hookSpecificOutput", {}).get("hookEventName")
+            assert event != "PreToolUse", (
+                f"PostToolUse event must not emit PreToolUse output; got {event!r}: {data}"
+            )
+
     def test_aws_secretsmanager_wrapped(self, sid):
         """aws secretsmanager get-secret-value should be wrapped with mask script."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id mykey"}, sid)

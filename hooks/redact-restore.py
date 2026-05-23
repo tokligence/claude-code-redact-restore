@@ -728,7 +728,20 @@ try:
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
     session_id = input_data.get("session_id", "default")
-    is_post_hook = "tool_result" in input_data
+    # Detect PostToolUse: prefer the authoritative hook_event_name when
+    # Claude Code provides it; fall back to payload-shape sniffing for
+    # legacy clients. Bug fix 2026-05-24: older code only checked
+    # `tool_result`, but current Claude Code sends `tool_response`, so
+    # PostToolUse events were misclassified as PreToolUse — the Bash
+    # branch would re-emit a `permissionDecision` JSON with
+    # `hookEventName: "PreToolUse"`, which Claude Code rejected with
+    # "Hook returned incorrect event name".
+    _hook_event = input_data.get("hook_event_name", "")
+    is_post_hook = (
+        _hook_event == "PostToolUse"
+        or "tool_result" in input_data
+        or "tool_response" in input_data
+    )
 
     debug_log(f"Hook start: tool={tool_name} post={is_post_hook} session={session_id}")
 
