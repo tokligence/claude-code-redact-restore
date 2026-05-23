@@ -139,18 +139,41 @@ if not _patterns_loaded:
 # Both files share the same module surface:
 #   CUSTOM_SECRET_PATTERNS = [("NAME", r"regex"), ...]
 #   CUSTOM_BLOCKED_FILES   = ["sensitive.yaml", ...]
+_LOADED_PATTERN_PATHS = set()
+
+
 def _load_custom_patterns_from(path):
+    """Idempotent — won't double-load the same file path.
+
+    Also compiles any new regex and appends to COMPILED_PATTERNS so a
+    later `_load_project_custom_patterns(payload_cwd)` from the
+    dispatcher actually adds usable patterns (not just SECRET_PATTERNS
+    list entries that nobody compiles)."""
     try:
         if not path or not os.path.exists(path):
             return
+        abspath = os.path.abspath(path)
+        if abspath in _LOADED_PATTERN_PATHS:
+            return
+        _LOADED_PATTERN_PATHS.add(abspath)
+
         import importlib.util
         spec = importlib.util.spec_from_file_location(
-            f"custom_patterns_{abs(hash(path))}", path
+            f"custom_patterns_{abs(hash(abspath))}", abspath
         )
         custom_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(custom_mod)
         if hasattr(custom_mod, "CUSTOM_SECRET_PATTERNS"):
-            SECRET_PATTERNS.extend(custom_mod.CUSTOM_SECRET_PATTERNS)
+            for name, regex in custom_mod.CUSTOM_SECRET_PATTERNS:
+                SECRET_PATTERNS.append((name, regex))
+                # Compile incrementally if COMPILED_PATTERNS already exists
+                # (i.e. we're past initial module load and being called from
+                # dispatcher with payload cwd).
+                if "COMPILED_PATTERNS" in globals():
+                    try:
+                        COMPILED_PATTERNS.append((name, re.compile(regex)))
+                    except re.error:
+                        pass
         if hasattr(custom_mod, "CUSTOM_BLOCKED_FILES"):
             BLOCKED_FILES.extend(custom_mod.CUSTOM_BLOCKED_FILES)
     except Exception:
@@ -161,28 +184,23 @@ def _load_custom_patterns_from(path):
 _load_custom_patterns_from(os.path.join(_SCRIPT_DIR, "custom-patterns.py"))
 
 
-def _resolve_project_dir():
+def _resolve_project_dir(payload_cwd=None):
     """
     Find the project root for loading per-project custom-patterns.py.
 
     Priority:
-      1. $CLAUDE_PROJECT_DIR — Claude Code sets this in the hook env
-         when launching the dispatcher, and it's reliably the project
-         root regardless of which subdirectory the user invoked from.
-      2. `cwd` field on the hook payload (parsed by dispatcher) —
-         secondary source, also generally project root.
-      3. `os.getcwd()` — fallback only. Module-import time CWD may not
-         be the project root (Codex R1 [P2]).
+      1. Explicit `payload_cwd` (hook payload's `cwd` field) — most
+         authoritative when available (Codex R2 [P2]).
+      2. $CLAUDE_PROJECT_DIR — Claude Code sets this in the hook env.
+      3. `os.getcwd()` — last-resort fallback.
 
-    Returns None if no candidate is found.
+    Returns None if no candidate is a valid directory.
     """
+    if payload_cwd and os.path.isdir(payload_cwd):
+        return payload_cwd
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     if env_dir and os.path.isdir(env_dir):
         return env_dir
-    # cwd fallback — note this is the interpreter's cwd, not the hook
-    # payload's `cwd` field (the payload isn't parsed yet at import time).
-    # Dispatcher can re-trigger loading via _load_project_custom_patterns()
-    # below once it has the payload.
     try:
         cwd = os.getcwd()
         if os.path.isdir(cwd):
@@ -192,13 +210,15 @@ def _resolve_project_dir():
     return None
 
 
-def _load_project_custom_patterns(project_dir=None):
+def _load_project_custom_patterns(payload_cwd=None):
     """
-    Load (or re-load) per-project custom patterns. Called once at module
-    import and may be re-invoked by the dispatcher once it has parsed the
-    hook payload (which carries an authoritative `cwd`).
+    Load (or re-load, idempotently) per-project custom patterns.
+
+    The dispatcher should call this with `data.get("cwd")` early in each
+    hook event so the authoritative payload-cwd path is honoured even if
+    the interpreter's getcwd() and env are wrong.
     """
-    target_dir = project_dir or _resolve_project_dir()
+    target_dir = _resolve_project_dir(payload_cwd)
     if not target_dir:
         return
     _load_custom_patterns_from(os.path.join(target_dir, ".claude", "custom-patterns.py"))
@@ -207,6 +227,9 @@ def _load_project_custom_patterns(project_dir=None):
 _load_project_custom_patterns()
 
 # ── Compile patterns once ────────────────────────────────────────────────
+# (Subsequent `_load_project_custom_patterns(payload_cwd)` calls from the
+# dispatcher will compile new patterns incrementally in-place — see
+# `_load_custom_patterns_from` above.)
 COMPILED_PATTERNS = []
 for name, regex in SECRET_PATTERNS:
     try:

@@ -33,15 +33,31 @@ AUTOPILOT_INIT_RE = re.compile(r"<!--\s*autopilot-init:")
 
 
 def run_shield(input_json: str) -> dict:
-    """Run the existing redact-restore.py and capture its output."""
+    """Run the existing redact-restore.py and capture its output.
+
+    Forwards the hook payload's `cwd` field via `CLAUDE_PROJECT_DIR` env
+    var so the subprocess's module-level per-project pattern loader
+    (in redact-restore.py) sees the authoritative project root, even if
+    the dispatcher's own cwd / inherited env is wrong (Codex R2 [P2])."""
     shield_path = os.path.join(HOOKS_DIR, "redact-restore.py")
     try:
+        payload_cwd = ""
+        try:
+            payload_cwd = (json.loads(input_json) or {}).get("cwd", "") or ""
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        env = os.environ.copy()
+        if payload_cwd and os.path.isdir(payload_cwd):
+            env["CLAUDE_PROJECT_DIR"] = payload_cwd
+
         result = subprocess.run(
             [sys.executable, shield_path],
             input=input_json,
             capture_output=True,
             text=True,
             timeout=25,
+            env=env,
         )
         if result.stdout.strip():
             return json.loads(result.stdout.strip())
@@ -292,6 +308,13 @@ def main():
         sys.exit(0)
 
     event = data.get("hook_event_name", "")
+
+    # NOTE on per-project patterns: redact-restore is invoked as a
+    # subprocess (see run_shield), so its module-level pattern loader
+    # runs in a separate process and shares nothing with us. We forward
+    # the payload's `cwd` via the CLAUDE_PROJECT_DIR env var inside
+    # run_shield() — that's what the subprocess actually reads (Codex
+    # R2 [P2]).
 
     # ── PreCompact: archive turns (memory only, shield not involved) ──
     if event == "PreCompact":

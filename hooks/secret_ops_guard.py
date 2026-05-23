@@ -29,8 +29,10 @@ import sys
 import tempfile
 from typing import Optional
 
-# Same state file as redact-restore so "go-secret" resumption can find it.
-_STATE_PREFIX = ".claude-secret-shield-"
+# Dedicated state file — kept SEPARATE from redact-restore's shield
+# session state to avoid cross-feature blob overwrites (Codex R2 [P2]).
+# Both files share the session+agent key but live at different paths.
+_STATE_PREFIX = ".claude-secret-ops-"
 
 
 def _session_id(payload: dict) -> str:
