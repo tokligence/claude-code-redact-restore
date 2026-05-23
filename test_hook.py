@@ -2375,39 +2375,39 @@ class TestSecretManagerBashWrapping:
         assert o is None
 
 
-    # ── CRITICAL: Deny pipes/redirects/subshells ────────────────────────
-    def test_pipe_denied(self, sid):
-        """Secret manager command with pipe should be denied."""
+    # ── Soft-block pipes/redirects/subshells with ask (yellow UI) ───────
+    def test_pipe_asks(self, sid):
+        """Secret manager command with pipe surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x | jq .SecretString"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
         assert "pipe" in o["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
-    def test_redirect_denied(self, sid):
-        """Secret manager command with > redirect should be denied."""
+    def test_redirect_asks(self, sid):
+        """Secret manager command with > redirect surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x > /tmp/out.json"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
         assert "redirect" in o["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
-    def test_tee_denied(self, sid):
-        """Secret manager command with tee should be denied."""
+    def test_tee_asks(self, sid):
+        """Secret manager command with tee surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x | tee /tmp/out.json"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_command_substitution_denied(self, sid):
-        """Secret manager command inside $() should be denied."""
+    def test_command_substitution_asks(self, sid):
+        """Secret manager command inside $() surfaces ask UI (legitimate for VAR=$(...) — user judges)."""
         o, c, _ = run_hook("Bash", {"command": "echo $(aws secretsmanager get-secret-value --secret-id x)"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
         assert "substitution" in o["hookSpecificOutput"]["permissionDecisionReason"].lower()
 
-    def test_backtick_substitution_denied(self, sid):
-        """Secret manager command inside backticks should be denied."""
+    def test_backtick_substitution_asks(self, sid):
+        """Secret manager command inside backticks surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "echo `aws secretsmanager get-secret-value --secret-id x`"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     # ── AWS --profile flag ──────────────────────────────────────────────
     def test_aws_with_profile_flag_wrapped(self, sid):
@@ -2448,11 +2448,11 @@ class TestSecretManagerBashWrapping:
         assert c == 0 and o is not None
         assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
 
-    def test_vault_kv_get_with_pipe_denied(self, sid):
-        """vault kv get with pipe should be denied."""
+    def test_vault_kv_get_with_pipe_asks(self, sid):
+        """vault kv get with pipe surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "vault kv get secret/x | jq .data"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     # ── GCP with --format flag ──────────────────────────────────────────
     def test_gcloud_with_format_json_uses_json_mode(self, sid):
@@ -2471,35 +2471,35 @@ class TestSecretManagerBashWrapping:
         assert "mask-output.py" in o["hookSpecificOutput"]["updatedInput"]["command"]
 
 
-    def test_semicolon_chain_denied(self, sid):
-        """Secret manager command chained with ; should be denied."""
+    def test_semicolon_chain_asks(self, sid):
+        """Secret manager command chained with ; surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x ; echo done"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_and_chain_denied(self, sid):
-        """Secret manager command chained with && should be denied."""
+    def test_and_chain_asks(self, sid):
+        """Secret manager command chained with && surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x && echo done"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_or_chain_denied(self, sid):
-        """Secret manager command chained with || should be denied."""
+    def test_or_chain_asks(self, sid):
+        """Secret manager command chained with || surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x || echo fallback"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_redirect_no_space_denied(self, sid):
-        """Redirect without space (>/path) should be denied."""
+    def test_redirect_no_space_asks(self, sid):
+        """Redirect without space (>/path) surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x >/tmp/out.json"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
-    def test_append_redirect_denied(self, sid):
-        """Append redirect (>>) should be denied."""
+    def test_append_redirect_asks(self, sid):
+        """Append redirect (>>) surfaces ask UI."""
         o, c, _ = run_hook("Bash", {"command": "aws secretsmanager get-secret-value --secret-id x >> /tmp/out.json"}, sid)
         assert c == 0 and o is not None
-        assert o["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert o["hookSpecificOutput"]["permissionDecision"] == "ask"
 
     def test_pipe_inside_quotes_allowed(self, sid):
         """Pipe inside quoted argument should NOT be denied."""
