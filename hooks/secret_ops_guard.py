@@ -294,10 +294,7 @@ def check(payload: dict) -> Optional[dict]:
                         "permissionDecisionReason": (
                             f"🛡️  This command reads a production-grade secret "
                             f"(pattern: {pattern_name}). Approve only if intentional.\n\n"
-                            f"Command: {cmd[:200]}{'…' if len(cmd) > 200 else ''}\n\n"
-                            f"Tip: for multi-shot approval, the user can type "
-                            f"'pass-secret N' (next N commands) or 'pass-secret off' "
-                            f"(session-wide) in their next message instead of clicking Approve."
+                            f"Command: {cmd[:200]}{'…' if len(cmd) > 200 else ''}"
                         ),
                     }
                 }

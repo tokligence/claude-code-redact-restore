@@ -132,7 +132,10 @@ class TestPreToolUseCheck(unittest.TestCase):
         )
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("aws-secretsmanager-get-secret-value", reason)
-        self.assertIn("pass-secret", reason)
+        # Reason text intentionally does NOT advertise the keyword flow
+        # (pass-secret / go-secret) — the native yellow Approve/Deny UI
+        # is the primary path. Keyword fallback is undocumented (still
+        # functional for users who recall it, but no longer suggested).
 
     def test_denied_command_is_queued_in_state(self):
         cmd = "aws secretsmanager get-secret-value --secret-id foo"
