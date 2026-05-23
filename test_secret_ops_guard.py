@@ -468,17 +468,99 @@ class TestAgentScopeIsolation(unittest.TestCase):
                 pass
 
 
+class TestConcurrencyAtomicBypass(unittest.TestCase):
+    """Codex R4 [P1] — bypass consumption must be atomic under
+    parallel PreToolUse hooks. Two threads racing against
+    `secret_ops_bypass_remaining=1` must NOT both succeed."""
+
+    def test_parallel_check_consumes_only_one_bypass(self):
+        import threading
+        session = "race-test-" + os.urandom(4).hex()
+        key = f"{session}::main"
+        _clear_state(session)
+
+        # Seed state with a single multi-shot bypass (no fingerprint
+        # binding — so any matching command can consume it).
+        guard._save_state(key, {"secret_ops_bypass_remaining": 1})
+
+        cmd = "aws kms decrypt --ciphertext-blob foo"
+        results = []
+        barrier = threading.Barrier(8)
+
+        def hammer():
+            barrier.wait()
+            r = guard.check(_payload(session, cmd))
+            results.append(r)
+
+        threads = [threading.Thread(target=hammer) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Exactly ONE caller should see None (allowed); the rest
+        # should see a deny payload.
+        allowed = sum(1 for r in results if r is None)
+        denied = sum(1 for r in results if r is not None)
+        self.assertEqual(
+            allowed, 1,
+            f"expected 1 allow, got {allowed} (denied={denied}). "
+            f"Race condition leaked extra bypasses."
+        )
+        self.assertEqual(denied, 7)
+
+        # State should show bypass exhausted
+        state = guard._load_state(key)
+        self.assertEqual(state.get("secret_ops_bypass_remaining", 0), 0)
+
+        _clear_state(session)
+
+
+class TestWrappedPayloadPromptExtract(unittest.TestCase):
+    """Codex R4 [P2] — the __main__ block + dispatcher must extract
+    prompts from wrapped payloads (top-level OR nested under `data`)."""
+
+    def test_main_block_handles_nested_data_user_prompt(self):
+        """Direct subprocess call with a wrapped payload should still
+        recognize 'go-secret' and ack the queued command."""
+        import subprocess
+
+        session = "wrap-test-" + os.urandom(4).hex()
+        _clear_state(session)
+
+        # Queue a command (top-level payload, works either way)
+        guard.check(_payload(session, "aws kms decrypt --ciphertext-blob z"))
+
+        # Now send a wrapped UserPromptSubmit where prompt is under data.message
+        wrapped = {
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": session,
+            "data": {"message": "go-secret"},
+        }
+        result = subprocess.run(
+            ["python3", "/Users/tonyseah/personal/redmem/hooks/secret_ops_guard.py"],
+            input=json.dumps(wrapped),
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.strip(), f"expected non-empty stdout, got {result.stdout!r}")
+        ack = json.loads(result.stdout)
+        ctx = ack.get("hookSpecificOutput", {}).get("additionalContext", "")
+        self.assertIn("go-secret", ctx)
+
+        _clear_state(session)
+
+
 class TestFailClosed(unittest.TestCase):
     """Codex R3 [P2] — when state I/O fails (e.g. unwritable tempdir),
     the guard must DENY the dangerous command, not silently let it
     through via the dispatcher's outer except-Exception."""
 
     def test_check_fails_closed_when_state_unsavable(self):
-        # Patch _save_state to raise — simulate unwritable tempdir
-        original = guard._save_state
-        guard._save_state = lambda *a, **k: (_ for _ in ()).throw(
-            OSError("Read-only file system")
-        )
+        # Simulate unwritable tempdir by patching _state_path to point at
+        # a directory that doesn't exist (os.open will raise FileNotFoundError).
+        original = guard._state_path
+        guard._state_path = lambda _k: "/nonexistent-path/no-such-dir/state.json"
         try:
             payload = _payload("fc-test", "aws kms decrypt --ciphertext-blob x")
             resp = guard.check(payload)
@@ -486,9 +568,11 @@ class TestFailClosed(unittest.TestCase):
             self.assertEqual(
                 resp["hookSpecificOutput"]["permissionDecision"], "deny"
             )
-            self.assertIn("fail-closed", resp["hookSpecificOutput"]["permissionDecisionReason"])
+            # Verify the deny reason indicates the fail-closed reason
+            reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+            self.assertIn("fail-closed", reason)
         finally:
-            guard._save_state = original
+            guard._state_path = original
             _clear_state("fc-test")
 
 

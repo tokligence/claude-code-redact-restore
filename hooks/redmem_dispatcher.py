@@ -341,9 +341,25 @@ def main():
         # keywords that approve a queued PreToolUse Bash command. Runs even if
         # shield blocked because the keyword phrases don't contain secrets and
         # the user might be unblocking unrelated state.
+        #
+        # Codex R4 [P2]: read prompt text from BOTH top-level and nested
+        # `data` payload (some Claude Code variants wrap it). Mirror
+        # redact-restore.get_prompt_text() exactly.
+        def _extract_prompt_text(d):
+            candidates = [d]
+            nested = d.get("data") if isinstance(d, dict) else None
+            if isinstance(nested, dict):
+                candidates.append(nested)
+            for c in candidates:
+                for key in ("user_prompt", "prompt", "message"):
+                    v = c.get(key)
+                    if isinstance(v, str) and v:
+                        return v
+            return ""
+
         try:
             from secret_ops_guard import handle_user_prompt as secret_ops_user_prompt
-            prompt_text = data.get("prompt") or data.get("user_prompt") or ""
+            prompt_text = _extract_prompt_text(data)
             so_result = secret_ops_user_prompt(data, prompt_text)
             if so_result:
                 so_ctx = so_result.get("hookSpecificOutput", {}).get("additionalContext", "")

@@ -21,6 +21,8 @@ UserPromptSubmit, this guards PreToolUse Bash.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -77,6 +79,55 @@ def _save_state(state_key: str, state: dict) -> None:
     fd = os.open(_state_path(state_key), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(state, f)
+
+
+@contextlib.contextmanager
+def _exclusive_state(state_key: str):
+    """
+    Atomic load-modify-save with exclusive file lock (POSIX fcntl).
+
+    Codex R4 [P1]: two parallel PreToolUse Bash hooks for the same
+    session/agent could both read remaining=1, both decide to allow,
+    both write remaining=0 — over-consuming the user's approval.
+    Wrapping the critical section in fcntl.flock(LOCK_EX) serializes
+    concurrent hook processes so the read/modify/save is atomic.
+
+    On context exit (normal or via early return), the (possibly
+    mutated) state is persisted to disk and the lock is released.
+
+    Caller responsibility: only mutate the yielded `state` dict.
+    Raising inside the with-block aborts the write (lock still
+    released) — callers wrap with try/except and use _fail_closed().
+    """
+    path = _state_path(state_key)
+    # O_RDWR | O_CREAT — open or create the state file. We hold the
+    # fd for the lifetime of the lock so writes & lock share fd.
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Read current contents (may be empty)
+        os.lseek(fd, 0, 0)
+        blob = os.read(fd, 1 << 20) or b"{}"
+        try:
+            state = json.loads(blob) if blob else {}
+            if not isinstance(state, dict):
+                state = {}
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            state = {}
+
+        yield state  # caller mutates `state` in place
+
+        # Persist
+        new_blob = json.dumps(state).encode("utf-8")
+        os.lseek(fd, 0, 0)
+        os.write(fd, new_blob)
+        os.ftruncate(fd, len(new_blob))
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +212,10 @@ def check(payload: dict) -> Optional[dict]:
     """
     Inspect a PreToolUse payload. Return a hookSpecificOutput dict to deny,
     or None to allow.
+
+    Critical section (load + decide + decrement + save) runs under an
+    exclusive POSIX flock to make bypass consumption atomic across
+    concurrent PreToolUse hooks in the same session (Codex R4 [P1]).
     """
     if payload.get("tool_name") != "Bash":
         return None
@@ -172,106 +227,85 @@ def check(payload: dict) -> Optional[dict]:
     if not pattern_name:
         return None
 
-    # Wrap state I/O in a single try block: any failure here means we
-    # can't reliably track approval, so we fail CLOSED (deny). The
-    # dispatcher's outer `except Exception: pass` would otherwise let
-    # the dangerous command through silently.
-    try:
-        state_key = _state_key(payload)
-        state = _load_state(state_key)
-    except Exception as e:
-        return _fail_closed(pattern_name, e)
-
-    remaining = state.get("secret_ops_bypass_remaining", 0)
+    state_key = _state_key(payload)
     cmd_fp = _cmd_fingerprint(cmd)
+    # Result carries either the deny payload (or None to allow). We
+    # build it inside the locked section, then return after the lock
+    # releases so the lock window is as short as possible.
+    deny_payload: Optional[dict] = None
 
-    if remaining == -1:
-        # `pass-secret off` — session-wide bypass, no command binding.
-        return None
-
-    if remaining > 0:
-        # One-shot / N-shot bypass.
-        #
-        # Codex R1 [P1] fix: bind `go-secret` (one-shot) to the exact
-        # command the user saw. Without this, the AI could "spend" a
-        # one-shot approval on a different secret read.
-        #
-        # `pass-secret N` (multi-shot) deliberately does NOT bind so
-        # the user can pre-approve a batch of operations.
-        bound_fp = state.get("secret_ops_bound_fingerprint")
-        if bound_fp and bound_fp != cmd_fp:
-            # Bound approval, but the command doesn't match — refuse and
-            # keep the bypass intact so the user can retry the original.
-            state["pending_secret_op"] = {
-                "command": cmd[:1500],
-                "pattern": pattern_name,
-                "session_id": _session_id(payload),
-                "fingerprint": cmd_fp,
-            }
-            try:
-                _save_state(state_key, state)
-            except Exception as e:
-                return _fail_closed(pattern_name, e)
-            reason = (
-                "🛡️  redmem secret-ops guard: the queued approval is bound to a "
-                "DIFFERENT command than the one the AI is now trying to run. "
-                "Approval is consumed only by the exact command the human saw.\n\n"
-                f"Approved command fingerprint: {bound_fp[:12]}…\n"
-                f"Attempted command fingerprint: {cmd_fp[:12]}…\n\n"
-                "To approve this new command, the human types 'go-secret' (or "
-                "'pass-secret N' to allow multiple distinct commands)."
-            )
-            return {
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": reason,
-                }
-            }
-
-        # Allow and decrement
-        state["secret_ops_bypass_remaining"] = remaining - 1
-        # One-shot binding consumed; clear the binding so a fresh
-        # `go-secret` is required for the next command.
-        state.pop("secret_ops_bound_fingerprint", None)
-        try:
-            _save_state(state_key, state)
-        except Exception as e:
-            return _fail_closed(pattern_name, e)
-        return None
-
-    # Block — save the pending command + its fingerprint so the
-    # UserPromptSubmit `go-secret` handler can bind one-shot approval.
-    state["pending_secret_op"] = {
-        "command": cmd[:1500],  # cap to keep state file small
-        "pattern": pattern_name,
-        "session_id": _session_id(payload),
-        "fingerprint": cmd_fp,
-    }
     try:
-        _save_state(state_key, state)
-    except Exception as e:
+        with _exclusive_state(state_key) as state:
+            remaining = state.get("secret_ops_bypass_remaining", 0)
+
+            if remaining == -1:
+                # `pass-secret off` — session-wide bypass, no consume.
+                return None
+
+            if remaining > 0:
+                bound_fp = state.get("secret_ops_bound_fingerprint")
+                if bound_fp and bound_fp != cmd_fp:
+                    # Bound approval, command doesn't match — refuse and
+                    # KEEP the bypass intact so user can retry original.
+                    state["pending_secret_op"] = {
+                        "command": cmd[:1500],
+                        "pattern": pattern_name,
+                        "session_id": _session_id(payload),
+                        "fingerprint": cmd_fp,
+                    }
+                    deny_payload = {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": (
+                                "🛡️  redmem secret-ops guard: the queued approval is "
+                                "bound to a DIFFERENT command than the one the AI "
+                                "is now trying to run. Approval is consumed only "
+                                "by the exact command the human saw.\n\n"
+                                f"Approved command fingerprint: {bound_fp[:12]}…\n"
+                                f"Attempted command fingerprint: {cmd_fp[:12]}…\n\n"
+                                "To approve this new command, the human types "
+                                "'go-secret' (or 'pass-secret N' to allow multiple "
+                                "distinct commands)."
+                            ),
+                        }
+                    }
+                else:
+                    # Allow and decrement atomically
+                    state["secret_ops_bypass_remaining"] = remaining - 1
+                    state.pop("secret_ops_bound_fingerprint", None)
+                    # deny_payload stays None → return None → allow
+            else:
+                # No bypass — block + queue the command
+                state["pending_secret_op"] = {
+                    "command": cmd[:1500],
+                    "pattern": pattern_name,
+                    "session_id": _session_id(payload),
+                    "fingerprint": cmd_fp,
+                }
+                deny_payload = {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"🛡️  redmem secret-ops guard: this command reads a "
+                            f"production-grade secret (pattern: {pattern_name}).\n\n"
+                            f"Command: {cmd[:200]}{'…' if len(cmd) > 200 else ''}\n\n"
+                            f"To approve, the human user types in their next message:\n"
+                            f"  go-secret        — approve this one command\n"
+                            f"  pass-secret N    — approve next N matching commands\n"
+                            f"  pass-secret off  — disable scanning for this session\n\n"
+                            f"Do NOT ask the user to run this command manually — "
+                            f"they will use one of the keywords above to authorize "
+                            f"it from inside the AI session."
+                        ),
+                    }
+                }
+    except OSError as e:
+        # State file unavailable (e.g. read-only tempdir) — fail CLOSED.
         return _fail_closed(pattern_name, e)
 
-    reason = (
-        f"🛡️  redmem secret-ops guard: this command reads a production-grade "
-        f"secret (pattern: {pattern_name}).\n\n"
-        f"Command: {cmd[:200]}{'…' if len(cmd) > 200 else ''}\n\n"
-        f"To approve, the human user types in their next message:\n"
-        f"  go-secret        — approve this one command\n"
-        f"  pass-secret N    — approve next N matching commands\n"
-        f"  pass-secret off  — disable scanning for this session\n\n"
-        f"Do NOT ask the user to run this command manually — they will use "
-        f"one of the keywords above to authorize it from inside the AI session."
-    )
-
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }
+    return deny_payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,7 +409,19 @@ if __name__ == "__main__":
             sys.stdout.write(json.dumps(result))
         sys.exit(0)
     if event == "UserPromptSubmit":
-        prompt = payload.get("prompt") or payload.get("user_prompt") or ""
+        # Handle wrapped payloads (top-level OR nested `data`),
+        # matching redact-restore.get_prompt_text() (Codex R4 [P2]).
+        prompt = ""
+        for candidate in (payload, payload.get("data") if isinstance(payload.get("data"), dict) else None):
+            if not isinstance(candidate, dict):
+                continue
+            for key in ("user_prompt", "prompt", "message"):
+                v = candidate.get(key)
+                if isinstance(v, str) and v:
+                    prompt = v
+                    break
+            if prompt:
+                break
         result = handle_user_prompt(payload, prompt)
         if result:
             sys.stdout.write(json.dumps(result))
