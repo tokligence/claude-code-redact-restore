@@ -116,6 +116,12 @@ def _match_command(cmd: str) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Hook entry point
 # ─────────────────────────────────────────────────────────────────────────────
+def _cmd_fingerprint(cmd: str) -> str:
+    """Stable SHA256 fingerprint of a command, used to bind a one-shot
+    `go-secret` approval to the exact command the user saw."""
+    return hashlib.sha256(cmd.encode("utf-8", errors="replace")).hexdigest()
+
+
 def check(payload: dict) -> Optional[dict]:
     """
     Inspect a PreToolUse payload. Return a hookSpecificOutput dict to deny,
@@ -131,25 +137,67 @@ def check(payload: dict) -> Optional[dict]:
     if not pattern_name:
         return None
 
-    # Check bypass counter
     state_key = _state_key(payload)
     state = _load_state(state_key)
     remaining = state.get("secret_ops_bypass_remaining", 0)
+    cmd_fp = _cmd_fingerprint(cmd)
+
     if remaining == -1:
-        # Disabled for session (after "pass-secret off")
+        # `pass-secret off` — session-wide bypass, no command binding.
         return None
+
     if remaining > 0:
+        # One-shot / N-shot bypass.
+        #
+        # Codex R1 [P1] fix: bind `go-secret` (one-shot) to the exact
+        # command the user saw. Without this, the AI could "spend" a
+        # one-shot approval on a different secret read.
+        #
+        # `pass-secret N` (multi-shot) deliberately does NOT bind so
+        # the user can pre-approve a batch of operations.
+        bound_fp = state.get("secret_ops_bound_fingerprint")
+        if bound_fp and bound_fp != cmd_fp:
+            # Bound approval, but the command doesn't match — refuse and
+            # keep the bypass intact so the user can retry the original.
+            state["pending_secret_op"] = {
+                "command": cmd[:1500],
+                "pattern": pattern_name,
+                "session_id": _session_id(payload),
+                "fingerprint": cmd_fp,
+            }
+            _save_state(state_key, state)
+            reason = (
+                "🛡️  redmem secret-ops guard: the queued approval is bound to a "
+                "DIFFERENT command than the one the AI is now trying to run. "
+                "Approval is consumed only by the exact command the human saw.\n\n"
+                f"Approved command fingerprint: {bound_fp[:12]}…\n"
+                f"Attempted command fingerprint: {cmd_fp[:12]}…\n\n"
+                "To approve this new command, the human types 'go-secret' (or "
+                "'pass-secret N' to allow multiple distinct commands)."
+            )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+
         # Allow and decrement
         state["secret_ops_bypass_remaining"] = remaining - 1
+        # One-shot binding consumed; clear the binding so a fresh
+        # `go-secret` is required for the next command.
+        state.pop("secret_ops_bound_fingerprint", None)
         _save_state(state_key, state)
         return None
 
-    # Block — save the pending command so the UserPromptSubmit
-    # `go-secret` handler can describe it (and so we can audit later).
+    # Block — save the pending command + its fingerprint so the
+    # UserPromptSubmit `go-secret` handler can bind one-shot approval.
     state["pending_secret_op"] = {
         "command": cmd[:1500],  # cap to keep state file small
         "pattern": pattern_name,
         "session_id": _session_id(payload),
+        "fingerprint": cmd_fp,
     }
     _save_state(state_key, state)
 
@@ -200,16 +248,23 @@ def handle_user_prompt(payload: dict, prompt: str) -> Optional[dict]:
         return None
 
     if text == "go-secret":
-        # Approve exactly one command
+        # Approve exactly one command, BOUND to the queued command's
+        # fingerprint. The next PreToolUse must run a command whose
+        # SHA256 matches `secret_ops_bound_fingerprint`, otherwise it's
+        # refused (Codex R1 [P1] — prevents bait-and-switch on bypass).
         state["secret_ops_bypass_remaining"] = 1
+        state["secret_ops_bound_fingerprint"] = pending.get("fingerprint", "")
         state.pop("pending_secret_op", None)
         _save_state(state_key, state)
         ctx = (
             "[redmem secret-ops guard] User approved the queued secret-reading "
-            "command with 'go-secret'. Retry the exact same Bash command now; "
-            "the next PreToolUse will pass.\n\n"
+            "command with 'go-secret'. The approval is bound to the EXACT "
+            "command shown below — retry that command verbatim; the next "
+            "PreToolUse will pass. If you change any argument the bypass "
+            "is refused and you'll need a fresh 'go-secret'.\n\n"
             f"Queued pattern: {pending.get('pattern')}\n"
-            f"Queued command (truncated): {pending.get('command', '')[:200]}"
+            f"Queued command (truncated): {pending.get('command', '')[:200]}\n"
+            f"Bound fingerprint: {pending.get('fingerprint','')[:12]}…"
         )
         return {
             "hookSpecificOutput": {
@@ -232,6 +287,9 @@ def handle_user_prompt(payload: dict, prompt: str) -> Optional[dict]:
             # Bare "pass-secret" — approve one
             state["secret_ops_bypass_remaining"] = 1
             note = "approved one queued secret-ops command"
+        # `pass-secret` is multi-shot by design — does NOT bind to a
+        # single command. User is explicitly allowing a batch.
+        state.pop("secret_ops_bound_fingerprint", None)
         state.pop("pending_secret_op", None)
         _save_state(state_key, state)
         ctx = (

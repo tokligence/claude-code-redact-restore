@@ -140,7 +140,8 @@ class TestPreToolUseCheck(unittest.TestCase):
         self.assertEqual(state["pending_secret_op"]["command"], cmd)
 
     def test_bypass_remaining_consumes_one_allow(self):
-        # Pre-set state to simulate "go-secret" approval
+        # Pre-set state to simulate "pass-secret 1" approval (multi-shot,
+        # NO fingerprint binding — any matching dangerous command allowed)
         key = f"{self.session}::main"
         guard._save_state(key, {"secret_ops_bypass_remaining": 1})
         cmd = "aws secretsmanager get-secret-value --secret-id foo"
@@ -151,6 +152,93 @@ class TestPreToolUseCheck(unittest.TestCase):
         # Second call → blocked again
         resp = guard.check(_payload(self.session, cmd))
         self.assertIsNotNone(resp)
+
+
+class TestFingerprintBinding(unittest.TestCase):
+    """`go-secret` binds the approval to the exact queued command.
+    Prevents bait-and-switch where AI swaps in a different secret read."""
+
+    def setUp(self):
+        self.session = "test-fp-" + os.urandom(4).hex()
+        _clear_state(self.session)
+
+    def tearDown(self):
+        _clear_state(self.session)
+
+    def test_go_secret_records_fingerprint(self):
+        cmd = "aws secretsmanager get-secret-value --secret-id foo"
+        guard.check(_payload(self.session, cmd))  # queue
+        guard.handle_user_prompt(
+            _prompt_payload(self.session, "go-secret"), "go-secret"
+        )
+        state = guard._load_state(f"{self.session}::main")
+        self.assertIn("secret_ops_bound_fingerprint", state)
+        expected_fp = guard._cmd_fingerprint(cmd)
+        self.assertEqual(state["secret_ops_bound_fingerprint"], expected_fp)
+
+    def test_go_secret_approved_command_passes(self):
+        cmd = "aws secretsmanager get-secret-value --secret-id foo"
+        guard.check(_payload(self.session, cmd))
+        guard.handle_user_prompt(
+            _prompt_payload(self.session, "go-secret"), "go-secret"
+        )
+        # Same exact command → allowed
+        self.assertIsNone(guard.check(_payload(self.session, cmd)))
+
+    def test_go_secret_different_command_blocked(self):
+        """Bait-and-switch: user approves cmd A, AI tries cmd B."""
+        cmd_a = "aws secretsmanager get-secret-value --secret-id staging/foo"
+        cmd_b = "aws secretsmanager get-secret-value --secret-id production/PROD"
+        guard.check(_payload(self.session, cmd_a))
+        guard.handle_user_prompt(
+            _prompt_payload(self.session, "go-secret"), "go-secret"
+        )
+        # Different command → denied even with bypass active
+        resp = guard.check(_payload(self.session, cmd_b))
+        self.assertIsNotNone(resp)
+        reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("DIFFERENT command", reason)
+
+        # Bypass NOT consumed — user can still retry the original
+        state = guard._load_state(f"{self.session}::main")
+        self.assertEqual(state["secret_ops_bypass_remaining"], 1)
+        self.assertEqual(
+            state["secret_ops_bound_fingerprint"], guard._cmd_fingerprint(cmd_a)
+        )
+        # Original command still works
+        self.assertIsNone(guard.check(_payload(self.session, cmd_a)))
+
+    def test_pass_secret_n_does_NOT_bind(self):
+        """`pass-secret 3` is explicit batch approval — no fingerprint binding."""
+        cmd_a = "aws secretsmanager get-secret-value --secret-id foo"
+        cmd_b = "aws kms decrypt --ciphertext-blob bar"  # different command, different pattern
+        guard.check(_payload(self.session, cmd_a))
+        guard.handle_user_prompt(
+            _prompt_payload(self.session, "pass-secret 3"), "pass-secret 3"
+        )
+        # All 3 allowed even with different commands
+        self.assertIsNone(guard.check(_payload(self.session, cmd_a)))
+        self.assertIsNone(guard.check(_payload(self.session, cmd_b)))
+        self.assertIsNone(guard.check(_payload(self.session, cmd_a)))
+        # 4th blocked
+        self.assertIsNotNone(guard.check(_payload(self.session, cmd_a)))
+
+    def test_one_shot_binding_consumed_after_use(self):
+        """After approved command runs, the binding is cleared — next
+        secret op needs fresh approval."""
+        cmd = "aws kms decrypt --ciphertext-blob foo"
+        guard.check(_payload(self.session, cmd))
+        guard.handle_user_prompt(
+            _prompt_payload(self.session, "go-secret"), "go-secret"
+        )
+        # Use the approval
+        self.assertIsNone(guard.check(_payload(self.session, cmd)))
+        # State should have bypass=0 AND no fingerprint
+        state = guard._load_state(f"{self.session}::main")
+        self.assertEqual(state["secret_ops_bypass_remaining"], 0)
+        self.assertNotIn("secret_ops_bound_fingerprint", state)
+        # Next attempt → re-blocked
+        self.assertIsNotNone(guard.check(_payload(self.session, cmd)))
 
     def test_bypass_off_session_wide(self):
         key = f"{self.session}::main"
@@ -264,7 +352,7 @@ class TestEndToEndFlow(unittest.TestCase):
         _clear_state(self.session)
 
     def test_go_secret_then_command_then_command_again(self):
-        cmd = "aws secretsmanager get-secret-value --secret-id kleepay/stag/jwt"
+        cmd = "aws secretsmanager get-secret-value --secret-id myapp/staging/jwt"
 
         # Step 1: Bash → denied + queued
         deny = guard.check(_payload(self.session, cmd))

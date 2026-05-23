@@ -159,10 +159,52 @@ def _load_custom_patterns_from(path):
 
 
 _load_custom_patterns_from(os.path.join(_SCRIPT_DIR, "custom-patterns.py"))
-try:
-    _load_custom_patterns_from(os.path.join(os.getcwd(), ".claude", "custom-patterns.py"))
-except OSError:
-    pass
+
+
+def _resolve_project_dir():
+    """
+    Find the project root for loading per-project custom-patterns.py.
+
+    Priority:
+      1. $CLAUDE_PROJECT_DIR — Claude Code sets this in the hook env
+         when launching the dispatcher, and it's reliably the project
+         root regardless of which subdirectory the user invoked from.
+      2. `cwd` field on the hook payload (parsed by dispatcher) —
+         secondary source, also generally project root.
+      3. `os.getcwd()` — fallback only. Module-import time CWD may not
+         be the project root (Codex R1 [P2]).
+
+    Returns None if no candidate is found.
+    """
+    env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
+    # cwd fallback — note this is the interpreter's cwd, not the hook
+    # payload's `cwd` field (the payload isn't parsed yet at import time).
+    # Dispatcher can re-trigger loading via _load_project_custom_patterns()
+    # below once it has the payload.
+    try:
+        cwd = os.getcwd()
+        if os.path.isdir(cwd):
+            return cwd
+    except OSError:
+        return None
+    return None
+
+
+def _load_project_custom_patterns(project_dir=None):
+    """
+    Load (or re-load) per-project custom patterns. Called once at module
+    import and may be re-invoked by the dispatcher once it has parsed the
+    hook payload (which carries an authoritative `cwd`).
+    """
+    target_dir = project_dir or _resolve_project_dir()
+    if not target_dir:
+        return
+    _load_custom_patterns_from(os.path.join(target_dir, ".claude", "custom-patterns.py"))
+
+
+_load_project_custom_patterns()
 
 # ── Compile patterns once ────────────────────────────────────────────────
 COMPILED_PATTERNS = []
