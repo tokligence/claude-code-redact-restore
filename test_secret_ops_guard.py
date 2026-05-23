@@ -116,20 +116,22 @@ class TestPreToolUseCheck(unittest.TestCase):
         payload = _payload(self.session, "ls /tmp")
         self.assertIsNone(guard.check(payload))
 
-    def test_dangerous_bash_denies(self):
+    def test_dangerous_bash_asks(self):
         payload = _payload(
             self.session,
             "aws secretsmanager get-secret-value --secret-id foo --profile prod",
         )
         resp = guard.check(payload)
         self.assertIsNotNone(resp)
+        # "ask" surfaces Claude Code's native approve/deny UI (yellow
+        # prompt). User clicks Approve to run the one command. Multi-shot
+        # bypass via "pass-secret N" keyword still works as a fallback.
         self.assertEqual(
             resp["hookSpecificOutput"]["permissionDecision"],
-            "deny",
+            "ask",
         )
         reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
         self.assertIn("aws-secretsmanager-get-secret-value", reason)
-        self.assertIn("go-secret", reason)
         self.assertIn("pass-secret", reason)
 
     def test_denied_command_is_queued_in_state(self):
@@ -355,9 +357,9 @@ class TestEndToEndFlow(unittest.TestCase):
     def test_go_secret_then_command_then_command_again(self):
         cmd = "aws secretsmanager get-secret-value --secret-id myapp/staging/jwt"
 
-        # Step 1: Bash → denied + queued
-        deny = guard.check(_payload(self.session, cmd))
-        self.assertEqual(deny["hookSpecificOutput"]["permissionDecision"], "deny")
+        # Step 1: Bash → ask (yellow UI) + queued
+        ask = guard.check(_payload(self.session, cmd))
+        self.assertEqual(ask["hookSpecificOutput"]["permissionDecision"], "ask")
 
         # Step 2: User types "go-secret" → bypass=1, queue cleared
         prompt_ack = guard.handle_user_prompt(
@@ -368,9 +370,9 @@ class TestEndToEndFlow(unittest.TestCase):
         # Step 3: Bash retried → allowed (bypass consumed)
         self.assertIsNone(guard.check(_payload(self.session, cmd)))
 
-        # Step 4: Bash retried again → denied (bypass exhausted)
-        deny2 = guard.check(_payload(self.session, cmd))
-        self.assertEqual(deny2["hookSpecificOutput"]["permissionDecision"], "deny")
+        # Step 4: Bash retried again → ask (bypass exhausted, surface UI again)
+        ask2 = guard.check(_payload(self.session, cmd))
+        self.assertEqual(ask2["hookSpecificOutput"]["permissionDecision"], "ask")
 
     def test_pass_secret_3_allows_three_then_blocks_fourth(self):
         cmd = "aws kms decrypt --ciphertext-blob fileb://x"
@@ -403,10 +405,10 @@ class TestEndToEndFlow(unittest.TestCase):
         guard.handle_user_prompt(_prompt_payload(sess_a, "go-secret"), "go-secret")
         self.assertIsNone(guard.check(_payload(sess_a, cmd)))
 
-        # Session B: same command → denied (no bypass in B's state)
-        deny_b = guard.check(_payload(sess_b, cmd))
-        self.assertIsNotNone(deny_b)
-        self.assertEqual(deny_b["hookSpecificOutput"]["permissionDecision"], "deny")
+        # Session B: same command → ask (no bypass in B's state, surface UI)
+        ask_b = guard.check(_payload(sess_b, cmd))
+        self.assertIsNotNone(ask_b)
+        self.assertEqual(ask_b["hookSpecificOutput"]["permissionDecision"], "ask")
 
         _clear_state(sess_a)
         _clear_state(sess_b)
@@ -454,11 +456,11 @@ class TestAgentScopeIsolation(unittest.TestCase):
             {**p_alpha, "prompt": "go-secret"}, "go-secret"
         )
 
-        # Beta with same session sees no approval — still denied
+        # Beta with same session sees no approval — still surfaces ask UI
         resp = guard.check(p_beta)
         self.assertIsNotNone(resp)
         self.assertEqual(
-            resp["hookSpecificOutput"]["permissionDecision"], "deny"
+            resp["hookSpecificOutput"]["permissionDecision"], "ask"
         )
 
         # Cleanup
@@ -506,17 +508,18 @@ class TestConcurrencyAtomicBypass(unittest.TestCase):
             outputs = list(pool.map(run_one_subprocess, range(8)))
 
         # Exactly ONE child should produce empty stdout (= allow).
-        # The other seven should produce a JSON deny payload.
+        # The other seven should produce a JSON ask payload (bypass exhausted
+        # → surface Claude Code's approve/deny UI on each retry).
         allowed = sum(1 for o in outputs if o == "")
-        denied = sum(1 for o in outputs if o and json.loads(o).get(
+        asked = sum(1 for o in outputs if o and json.loads(o).get(
             "hookSpecificOutput", {}
-        ).get("permissionDecision") == "deny")
+        ).get("permissionDecision") == "ask")
         self.assertEqual(
             allowed, 1,
-            f"expected 1 allow, got {allowed} (denied={denied}). "
+            f"expected 1 allow, got {allowed} (asked={asked}). "
             f"flock race leaked extra bypasses across processes."
         )
-        self.assertEqual(denied, 7)
+        self.assertEqual(asked, 7)
 
         # State should show bypass exhausted
         state = guard._load_state(key)

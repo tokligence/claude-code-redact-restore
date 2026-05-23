@@ -276,7 +276,11 @@ def check(payload: dict) -> Optional[dict]:
                     state.pop("secret_ops_bound_fingerprint", None)
                     # deny_payload stays None → return None → allow
             else:
-                # No bypass — block + queue the command
+                # No bypass — surface to user via Claude Code's native
+                # approval UI (permissionDecision="ask" → yellow prompt
+                # with Approve/Deny buttons). User clicks Approve to
+                # allow this one command; multi-shot bypass still
+                # available via the keyword flow below as a fallback.
                 state["pending_secret_op"] = {
                     "command": cmd[:1500],
                     "pattern": pattern_name,
@@ -286,18 +290,14 @@ def check(payload: dict) -> Optional[dict]:
                 deny_payload = {
                     "hookSpecificOutput": {
                         "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
+                        "permissionDecision": "ask",
                         "permissionDecisionReason": (
-                            f"🛡️  redmem secret-ops guard: this command reads a "
-                            f"production-grade secret (pattern: {pattern_name}).\n\n"
+                            f"🛡️  This command reads a production-grade secret "
+                            f"(pattern: {pattern_name}). Approve only if intentional.\n\n"
                             f"Command: {cmd[:200]}{'…' if len(cmd) > 200 else ''}\n\n"
-                            f"To approve, the human user types in their next message:\n"
-                            f"  go-secret        — approve this one command\n"
-                            f"  pass-secret N    — approve next N matching commands\n"
-                            f"  pass-secret off  — disable scanning for this session\n\n"
-                            f"Do NOT ask the user to run this command manually — "
-                            f"they will use one of the keywords above to authorize "
-                            f"it from inside the AI session."
+                            f"Tip: for multi-shot approval, the user can type "
+                            f"'pass-secret N' (next N commands) or 'pass-secret off' "
+                            f"(session-wide) in their next message instead of clicking Approve."
                         ),
                     }
                 }
