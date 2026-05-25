@@ -57,6 +57,30 @@ values replaced by `{{NAME_hash}}` placeholders. Treat the placeholders
 as the real values — the hook restores them when you write back. Never
 ask the user to re-enter or reveal a real secret.
 
+**git_guard (always-on).** Bulk-stage forms of `git add` are denied in
+every session:
+
+  - `git add -A` (incl. combined flags like `-Av`, `-vA`)
+  - `git add --all`
+  - `git add .` (standalone dot — `./path` is NOT matched)
+  - any of the above embedded in a chained command (e.g.
+    `cd repo && git add -A`)
+
+Safer alternatives:
+  - `git add path/to/file.py [more files...]` (list explicitly)
+  - `git add -u` (tracked changes only, no new files)
+
+**Edge case worth remembering.** The hook scans the entire Bash
+command string, so if your command CONTAINS one of those trigger
+substrings even incidentally (e.g. inside a `git commit -m \"...\"`
+message that happens to mention `git add -A`), it WILL be denied.
+Workaround: write the message to a file first, then commit by
+reference:
+
+    # Use the Write tool to drop your message into /tmp/msg.txt
+    # then run:  git commit -F /tmp/msg.txt
+    # The trigger substring lives in the file, not in the bash command.
+
 **Autopilot mode** (active only when `.autopilot/` exists in the repo
 root). The following destructive bash patterns are denied while
 autopilot is armed: `rm -rf`, `git reset --hard`, `git checkout -f`,

@@ -64,11 +64,15 @@ def test_empty_session_id_is_noop(isolated_state_dir):
 
 def test_cheatsheet_text_mentions_key_tools():
     text = cheatsheet_text()
-    # Spot-check the three things CC most needs to know about
+    # Spot-check the things CC most needs to know about
     assert "redmem-original" in text
     assert "{{NAME_hash}}" in text
     assert ".autopilot/" in text
     assert "AUTOPILOT_DONE" in text
+    # git_guard awareness so CC doesn't waste turns hitting the wall
+    assert "git_guard" in text
+    assert "git add -u" in text
+    assert "git commit -F" in text
 
 
 # ── End-to-end through the real dispatcher ────────────────────────────
