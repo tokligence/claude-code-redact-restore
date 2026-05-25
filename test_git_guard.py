@@ -124,6 +124,44 @@ def test_malformed_input_doesnt_crash():
     assert check_git_add({"tool_name": "Bash", "tool_input": {"command": None}}) is None
 
 
+# ── Hint message content (must educate Claude about workarounds) ─────
+
+
+def test_deny_hint_mentions_explicit_files_alternative():
+    resp = check_git_add(_payload("git add -A"))
+    reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "git add path/to/file" in reason
+
+
+def test_deny_hint_mentions_git_add_dash_u_alternative():
+    resp = check_git_add(_payload("git add -A"))
+    reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "git add -u" in reason
+
+
+def test_deny_hint_mentions_commit_F_file_workaround():
+    """When the trigger appears incidentally (e.g. in a commit -m message),
+    the user needs to know they can write the message to a file and use
+    `git commit -F`. Without this hint Claude would loop trying variants."""
+    resp = check_git_add(_payload("git add -A"))
+    reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "git commit -F" in reason
+    assert "incidentally" in reason.lower() or "incidentally" in reason
+
+
+def test_deny_hint_clarifies_env_var_must_be_set_before_claude():
+    """The env-prefix override `REDMEM_ALLOW_GIT_ADD_ALL=1 cmd` does NOT
+    work (hook reads CC parent env, not bash subprocess env). The hint
+    must say so to prevent users from being misled."""
+    resp = check_git_add(_payload("git add -A"))
+    reason = resp["hookSpecificOutput"]["permissionDecisionReason"]
+    assert OPT_OUT_ENV in reason
+    assert "before launching claude" in reason.lower() or \
+           "BEFORE launching claude" in reason
+    # Should explicitly warn against the per-command prefix form
+    assert "does NOT work" in reason or "does not work" in reason.lower()
+
+
 # ── Override env var ───────────────────────────────────────────────────
 
 

@@ -103,14 +103,29 @@ def check_git_add(data: dict) -> dict | None:
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
                 "permissionDecisionReason": (
-                    f"[redmem-gitguard] `git add -A` / `git add --all` / "
-                    f"`git add .` is denied (matched `{matched}` in this "
-                    f"command). Bulk-staging drags in secrets, build "
-                    f"artefacts, and unrelated WIP — list files explicitly:\n"
-                    f"  git add path/to/file.py [more files…]\n"
-                    f"or use `git add -u` to stage only TRACKED changes (no "
-                    f"new files). One-shot override: prefix your command "
-                    f"with `{OPT_OUT_ENV}=1`."
+                    f"[redmem-gitguard] Bulk-stage form detected "
+                    f"(matched `{matched}`). Bulk-staging drags in secrets, "
+                    f"build artefacts, and unrelated WIP.\n\n"
+                    f"If you actually want to stage everything, use ONE of:\n"
+                    f"  • git add path/to/file.py [more files...]   "
+                    f"(list explicitly)\n"
+                    f"  • git add -u                                  "
+                    f"(tracked changes only, no new files)\n\n"
+                    f"If the trigger appears INCIDENTALLY in your command "
+                    f"(e.g. inside a `git commit -m \"...\"` message, a "
+                    f"heredoc, or a string literal in your bash) — write "
+                    f"that text to a file first, then reference it:\n"
+                    f"  echo '<your text>' > /tmp/msg.txt\n"
+                    f"  git commit -F /tmp/msg.txt\n"
+                    f"(or use any other tool to write the file). The hook "
+                    f"scans the FULL bash command string, so the trigger "
+                    f"inside quoted text gets caught even when there's no "
+                    f"actual bulk-stage intent.\n\n"
+                    f"To disable this guard for the session, set "
+                    f"{OPT_OUT_ENV}=1 in your shell BEFORE launching "
+                    f"claude. Per-command env prefix does NOT work — the "
+                    f"hook reads the CC parent process env, not the Bash "
+                    f"subprocess env."
                 ),
             }
         }
