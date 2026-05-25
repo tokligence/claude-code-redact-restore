@@ -445,6 +445,18 @@ def main():
             print(json.dumps(orig_resp))
             sys.exit(0)
 
+        # git_guard — always-on deny for `git add -A` / --all / `.` even
+        # inside chained Bash commands that the settings.json permission
+        # matcher can't see into. Fail-open on any error.
+        try:
+            from git_guard import check_git_add
+            git_resp = check_git_add(data)
+            if git_resp:
+                print(json.dumps(git_resp))
+                sys.exit(0)
+        except Exception:
+            pass
+
         # Autopilot bash guard (only fires if session has active autopilot state).
         guard_resp = handle_pretooluse_bash_guard(data)
         if guard_resp:

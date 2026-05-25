@@ -125,6 +125,8 @@ chmod +x "$HOOKS_DIR/redmem_catchup.py"
 install_file "hooks/image_compressor.py"  "$HOOKS_DIR/image_compressor.py"
 chmod +x "$HOOKS_DIR/image_compressor.py"
 install_file "hooks/cheatsheet.py"        "$HOOKS_DIR/cheatsheet.py"
+install_file "hooks/git_guard.py"         "$HOOKS_DIR/git_guard.py"
+chmod +x "$HOOKS_DIR/git_guard.py"
 echo "  OK: Dispatcher + catchup + image compressor + cheatsheet installed"
 
 # ── Autopilot module + slash commands ───────────────────────────────────
