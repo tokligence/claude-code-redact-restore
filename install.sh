@@ -60,6 +60,56 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+# ── Pick an interpreter that can actually run the shield ────────────────
+# Hook commands get an ABSOLUTE path, resolved and verified here, rather than
+# the bare word `python3`. Two reasons, both learned the hard way:
+#
+#   1. Hook processes do not source your shell rc, so a `python3` that resolves
+#      correctly when you type it can resolve to something else entirely when
+#      Claude Code spawns the hook. An `alias python3=...` is worse than
+#      useless: it exists ONLY in interactive shells, so it hides the split
+#      instead of fixing it.
+#   2. `cryptography` is not optional in practice. Without it the mapping
+#      cannot be decrypted, and on 2026-07-27 a machine whose `python3` had
+#      silently moved to a build without it destroyed a 235-entry vault twice
+#      in one session. The shield now fails safe rather than destroying, but
+#      failing safe means NOT REDACTING — so a crypto-less interpreter still
+#      turns the shield off. Better to refuse to install than to install one
+#      that cannot protect anything.
+PYTHON_BIN=""
+for _candidate in \
+  "$REDMEM_PYTHON" \
+  "$(command -v python3 2>/dev/null)" \
+  /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 \
+  /usr/local/bin/python3 /usr/bin/python3
+do
+  [ -n "$_candidate" ] || continue
+  [ -x "$_candidate" ] || continue
+  if "$_candidate" -c 'import cryptography' >/dev/null 2>&1; then
+    PYTHON_BIN="$("$_candidate" -c 'import sys; print(sys.executable)')"
+    break
+  fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+  echo "  ERROR: no python3 with the 'cryptography' module was found."
+  echo ""
+  echo "  The secret shield stores its placeholder->secret mapping encrypted."
+  echo "  An interpreter without 'cryptography' cannot read it, so the shield"
+  echo "  would install and then quietly not protect anything."
+  echo ""
+  echo "  Fix either way:"
+  echo "    <your python3> -m pip install cryptography"
+  echo "    REDMEM_PYTHON=/path/to/python3 ./install.sh"
+  exit 1
+fi
+
+echo "  -> Hook interpreter: $PYTHON_BIN"
+if [ "$PYTHON_BIN" != "$(command -v python3 2>/dev/null)" ]; then
+  echo "     (note: differs from the python3 on your PATH — the absolute path"
+  echo "      is what gets written into settings.json, deliberately)"
+fi
+
 # ── Detect migration from claude-secret-shield ──────────────────────────
 MIGRATING=false
 if [ -f "$HOOKS_DIR/redact-restore.py" ] && ! [ -f "$HOOKS_DIR/redmem_dispatcher.py" ]; then
@@ -165,18 +215,18 @@ echo "  -> Configuring Claude Code settings..."
 
 # SessionEnd still calls shield directly — it's a simple cleanup pass
 # and doesn't need the dispatcher's multi-module routing.
-SHIELD_SESSION_END='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redact-restore.py","timeout":5}]}'
+SHIELD_SESSION_END='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redact-restore.py","timeout":5}]}'
 
 # Dispatcher hooks. The dispatcher is the single gateway for PreToolUse,
 # PostToolUse, UserPromptSubmit, Stop, PreCompact, and SessionStart —
 # it internally routes to shield / memory / autopilot / image compressor.
 # One matcher per event keeps settings.json clean.
-DISPATCH_PRE='{"matcher":"Read|Write|Edit|MultiEdit|NotebookEdit|Bash","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
-DISPATCH_POST='{"matcher":"Read|Write|Edit|Bash|TodoWrite|TodoRead|EnterPlanMode|ExitPlanMode|TaskCreate|TaskUpdate","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
-DISPATCH_PROMPT='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":5}]}'
-DISPATCH_COMPACT='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":30,"statusMessage":"Archiving session..."}]}'
-DISPATCH_RESUME='{"matcher":"resume","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":10,"statusMessage":"Loading session memory..."}]}'
-DISPATCH_STOP='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":15}]}'
+DISPATCH_PRE='{"matcher":"Read|Write|Edit|MultiEdit|NotebookEdit|Bash","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
+DISPATCH_POST='{"matcher":"Read|Write|Edit|Bash|TodoWrite|TodoRead|EnterPlanMode|ExitPlanMode|TaskCreate|TaskUpdate","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
+DISPATCH_PROMPT='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":5}]}'
+DISPATCH_COMPACT='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":30,"statusMessage":"Archiving session..."}]}'
+DISPATCH_RESUME='{"matcher":"resume","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10,"statusMessage":"Loading session memory..."}]}'
+DISPATCH_STOP='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":15}]}'
 
 if [ -f "$SETTINGS_FILE" ]; then
   EXISTING=$(cat "$SETTINGS_FILE")
@@ -193,9 +243,14 @@ if [ "$HAS_HOOKS" = "true" ]; then
     # Clean old entries
     def remove_old:
       map(select(
-        (.hooks[0].command != "python3 ~/.claude/hooks/redact-restore.py") and
-        (.hooks[0].command != "python3 ~/.claude/hooks/redmem_dispatcher.py") and
-        (.hooks[0].command != "~/.claude/hooks/redact-secrets.sh")
+        # Match by script path, not by the whole command: the interpreter
+        # prefix is now an absolute path resolved at install time, so an exact
+        # comparison would fail to clean up entries written by any other
+        # machine, any earlier version, or a different interpreter — and every
+        # re-install would append a duplicate instead of replacing.
+        ((.hooks[0].command // "") | endswith("hooks/redact-restore.py") | not) and
+        ((.hooks[0].command // "") | endswith("hooks/redmem_dispatcher.py") | not) and
+        ((.hooks[0].command // "") | endswith("hooks/redact-secrets.sh") | not)
       ));
 
     .hooks.PreToolUse = ((.hooks.PreToolUse // []) | remove_old) + [$dispatch_pre]
@@ -227,8 +282,8 @@ echo "  OK: Updated $SETTINGS_FILE"
 
 # ── Guard hook entries in settings.json (opt-in) ────────────────────────
 if [ "$INSTALL_GUARD" = true ]; then
-  GUARD_PRE='{"matcher":"Agent","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
-  GUARD_POST='{"matcher":"Agent","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
+  GUARD_PRE='{"matcher":"Agent","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
+  GUARD_POST='{"matcher":"Agent","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
 
   GUARD_UPDATED=$(cat "$SETTINGS_FILE" | jq \
     --argjson guard_pre "$GUARD_PRE" \
@@ -236,7 +291,10 @@ if [ "$INSTALL_GUARD" = true ]; then
     # Strip any existing guard entries so re-running install is idempotent.
     def strip_guard:
       map(select(
-        (.hooks[0].command // "") != "python3 ~/.claude/hooks/guard/agent_isolation_guard.py"
+        # Suffix match, for the same reason as remove_old above: the
+        # interpreter prefix is resolved per machine, so exact comparison
+        # would duplicate this entry on every re-install.
+        ((.hooks[0].command // "") | endswith("guard/agent_isolation_guard.py") | not)
       ));
       .hooks.PreToolUse  = ((.hooks.PreToolUse  // []) | strip_guard) + [$guard_pre]
     | .hooks.PostToolUse = ((.hooks.PostToolUse // []) | strip_guard) + [$guard_post]

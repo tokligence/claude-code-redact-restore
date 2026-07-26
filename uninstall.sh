@@ -110,17 +110,23 @@ if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
   # An entry is "ours" if any hook inside points at one of the commands we install.
   # Matches both wrapped form (".hooks[].command") and rare flat form (".command").
   UPDATED=$(cat "$SETTINGS_FILE" | jq '
+    # Matched by SCRIPT PATH, not by the whole command string. install.sh
+    # writes an absolute interpreter path resolved on the installing machine,
+    # so any exact comparison here uninstalls cleanly on the machine that
+    # wrote it and silently leaves entries behind everywhere else — including
+    # after the installing machine changes its python. Leftovers are worse
+    # than a failed uninstall: the entries stay, the hook files are gone, and
+    # every tool call starts failing to spawn.
+    def is_redmem_command:
+      (. // "")
+      | (endswith("hooks/redmem_dispatcher.py")
+         or endswith("hooks/redact-restore.py")
+         or endswith("guard/agent_isolation_guard.py")
+         or endswith("hooks/redact-secrets.sh"));
+
     def is_redmem_hook:
-      any((.hooks // [])[].command?;
-        . == "python3 ~/.claude/hooks/redmem_dispatcher.py"
-        or . == "python3 ~/.claude/hooks/redact-restore.py"
-        or . == "python3 ~/.claude/hooks/guard/agent_isolation_guard.py"
-        or . == "~/.claude/hooks/redact-secrets.sh"
-      )
-      or (.command? == "python3 ~/.claude/hooks/redmem_dispatcher.py")
-      or (.command? == "python3 ~/.claude/hooks/redact-restore.py")
-      or (.command? == "python3 ~/.claude/hooks/guard/agent_isolation_guard.py")
-      or (.command? == "~/.claude/hooks/redact-secrets.sh");
+      any((.hooks // [])[].command?; is_redmem_command)
+      or (.command? | is_redmem_command);
 
     def strip(event):
       if .hooks[event] then
