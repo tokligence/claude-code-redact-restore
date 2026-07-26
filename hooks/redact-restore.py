@@ -1123,6 +1123,28 @@ try:
         mapping carrying VAULT_UNREADABLE when a file exists but could not be
         interpreted — see the note above for why the distinction matters.
         """
+        # No cryptography in this interpreter is a degraded state for WRITES,
+        # not just for reads, and the write side is the dangerous half.
+        #
+        # An existing encrypted vault is already caught below (it will not
+        # decrypt). The case that slipped through was the FIRST run: with no
+        # file on disk there is nothing to fail at, so redaction proceeded and
+        # `save_mapping` took its plaintext branch — writing the user's real
+        # secrets, unencrypted, to `~/.claude/.redact-mapping.json`. The shield
+        # reports success the whole time. The `install.sh` interpreter check
+        # makes this unreachable for a normal install; this is the backstop for
+        # every other way a hook can be invoked.
+        #
+        # Plaintext persistence was originally a migration convenience. It is
+        # not worth what it costs here: the one thing this tool must never do
+        # is put secrets on disk in the clear while claiming to have hidden
+        # them.
+        if FERNET is None:
+            return _unreadable_vault(
+                "cryptography is unavailable to this interpreter, so the mapping "
+                "can be neither read nor safely written"
+            )
+
         data, reason = _read_mapping_file()
         if reason is not None:
             return _unreadable_vault(reason)

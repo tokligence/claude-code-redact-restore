@@ -240,3 +240,40 @@ def test_an_absent_mapping_is_still_created_normally(vault, tmp_path):
         "a missing mapping was treated as unreadable, so the shield can never "
         "bootstrap itself"
     )
+
+
+# ── A crypto-less interpreter must not fall back to plaintext ──────────
+
+
+def test_a_first_run_without_cryptography_never_writes_secrets_in_clear(vault, tmp_path):
+    """Found by adversarial review, and it is the mirror image of the original
+    incident: that one was "cannot READ, so destroy"; this one is "cannot
+    ENCRYPT, so write in the clear".
+
+    With no mapping on disk there is nothing to fail at, so redaction used to
+    proceed and `save_mapping` took its plaintext branch — putting the user's
+    real secrets, unencrypted, in `~/.claude/.redact-mapping.json` while the
+    shield reported success. Plaintext persistence was a migration
+    convenience; it is not worth having a tool whose entire job is hiding
+    secrets write them out in clear text.
+    """
+    env, home, _read, _s2p = vault
+    (home / ".claude" / ".redact-mapping.json").unlink()   # first run
+    blind = _blind_the_interpreter(env, tmp_path)
+
+    target = tmp_path / "config.yml"
+    original = f'api_key: "{FAKE_SECRET}"\n'
+    target.write_text(original)
+
+    _run_hook(blind, _read_event(target, tmp_path))
+
+    mapping = home / ".claude" / ".redact-mapping.json"
+    if mapping.exists():
+        body = mapping.read_bytes()
+        assert FAKE_SECRET.encode() not in body, (
+            "the secret was written to the mapping in plaintext"
+        )
+    assert target.read_text() == original, (
+        "the file was redacted against a mapping that could not be persisted "
+        "safely, so the placeholder is unrestorable"
+    )
