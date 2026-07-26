@@ -35,6 +35,21 @@ INSTALL_SH = os.path.join(REPO, "install.sh")
 
 
 def _run(payload: dict, env_extra: dict | None = None):
+    # These payloads go through the REAL dispatcher with the REAL environment,
+    # so the secret shield runs with the developer's real mapping. A Read
+    # PreToolUse redacts its target on disk and relies on the matching
+    # PostToolUse to put it back — which a test that only sends PreToolUse
+    # never delivers. Aiming that at a file in this repo rewrites the working
+    # tree: two tests here used to pass `REPO/README.md`, and every full-suite
+    # run silently replaced the example DSN in the published README with a
+    # `{{POSTGRES_URL_...}}` placeholder, staged and ready to commit.
+    # Hook payloads must therefore name throwaway paths, never repo files.
+    target = (payload.get("tool_input") or {}).get("file_path")
+    if target and os.path.abspath(target).startswith(REPO + os.sep):
+        raise AssertionError(
+            f"hook payload targets a file inside the repo: {target}\n"
+            "Use tmp_path — the real shield will rewrite it on disk."
+        )
     env = dict(os.environ)
     env.pop("REDMEM_ALLOW_DEPLOY_CONFIG", None)
     if env_extra:
@@ -93,9 +108,11 @@ def test_writing_a_dockerfile_asks_through_the_real_dispatcher():
     assert parsed["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
-def test_ordinary_source_edit_is_not_intercepted():
+def test_ordinary_source_edit_is_not_intercepted(tmp_path):
     """The guard must be invisible on the overwhelming majority of edits."""
-    proc, parsed = _run(_edit(os.path.join(REPO, "README.md")))
+    ordinary = tmp_path / "README.md"
+    ordinary.write_text("# ordinary source file\n")
+    proc, parsed = _run(_edit(str(ordinary)))
     assert proc.returncode == 0
     if parsed is not None:
         # Another handler (e.g. the shield) may legitimately respond; what
@@ -150,13 +167,15 @@ def test_git_add_all_is_still_denied_after_the_new_handler_was_inserted():
     assert "gitguard" in parsed["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def test_read_events_still_reach_the_image_compressor_path():
+def test_read_events_still_reach_the_image_compressor_path(tmp_path):
     """A Read must not be intercepted by a guard that only cares about writes."""
+    ordinary = tmp_path / "README.md"
+    ordinary.write_text("# ordinary source file\n")
     proc, parsed = _run(
         {
             "hook_event_name": "PreToolUse",
             "tool_name": "Read",
-            "tool_input": {"file_path": os.path.join(REPO, "README.md")},
+            "tool_input": {"file_path": str(ordinary)},
             "session_id": "test-deployguard-e2e",
             "cwd": REPO,
         }

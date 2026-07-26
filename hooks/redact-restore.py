@@ -1243,6 +1243,39 @@ try:
                     candidate_paths.add(m.group(1))
                 for m in re.finditer(r'(?<!\w)(\/[^\s;|&<>"\']+)', command):
                     candidate_paths.add(m.group(1))
+                # RELATIVE paths. Both patterns above require a leading `/`,
+                # so the ordinary way an agent rewrites a file —
+                #     python3 - <<'PY'
+                #     p = 'README.md'
+                #     s = open(p).read(); open(p, 'w').write(s)
+                #     PY
+                # — yielded no candidates at all, and a placeholder read off a
+                # momentarily-redacted file stayed baked in. That is how this
+                # repo's own README ended up holding {{POSTGRES_URL_...}} in
+                # place of a documentation example DSN. A placeholder in a
+                # public README is a broken doc; the same in a config file is
+                # a broken deploy.
+                #
+                # Over-collecting is deliberate and safe: a candidate is only
+                # touched when it is an existing, non-binary file that already
+                # contains a placeholder from the live mapping, and the only
+                # edit is placeholder -> its own secret. Under-collecting is
+                # what bakes a placeholder into a real file.
+                cwd = input_data.get("cwd") or os.getcwd()
+                rel_candidates = set()
+                # Quoted:  'README.md', "src/lib.rs", './docs/a.md'
+                for m in re.finditer(r"""['"]((?:\.{0,2}/)?[\w.-]+(?:/[\w.-]+)*)['"]""", command):
+                    rel_candidates.add(m.group(1))
+                # Bare: sed -i '' 's/a/b/' README.md   |   vim src/main.rs
+                for m in re.finditer(
+                    r"""(?<![\w/'"@-])((?:\.{1,2}/)?[\w.-]+(?:/[\w.-]+)+|[\w-]+\.[\w]{1,12})(?![\w/])""",
+                    command,
+                ):
+                    rel_candidates.add(m.group(1))
+                for rel in rel_candidates:
+                    if not rel or rel.startswith("/"):
+                        continue
+                    candidate_paths.add(os.path.normpath(os.path.join(cwd, rel)))
                 # Also check paths from pending backup metadata
                 if os.path.isdir(BACKUP_DIR):
                     for entry in os.listdir(BACKUP_DIR):
