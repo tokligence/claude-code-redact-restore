@@ -301,6 +301,7 @@ PLACEHOLDER_RE = re.compile(r'\{\{[A-Z0-9_]+_[a-f0-9]{8}x*\}\}')
 SHIELD_ERROR_LOG = os.path.expanduser("~/.claude/vault/restore-errors.log")
 SHIELD_ERROR_LOG_MAX_BYTES = 1_000_000
 SHIELD_ERROR_LOG_KEEP_LINES = 200
+SHIELD_ERROR_LOG_LOCK = SHIELD_ERROR_LOG + ".lock"
 
 
 def scrub_secrets(text, limit=500):
@@ -329,18 +330,54 @@ def record_shield_failure(kind, **fields):
         entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind}
         entry.update(fields)
         line = json.dumps(entry, default=str) + "\n"
-        os.makedirs(os.path.dirname(SHIELD_ERROR_LOG), mode=0o700, exist_ok=True)
+        log_dir = os.path.dirname(SHIELD_ERROR_LOG)
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
+
+        # Rotation and the append are ONE critical section. Rotation is
+        # read-tail-then-rewrite, and hook processes run concurrently — one per
+        # tool call. Unserialised, two of them both read the tail, both rewrite
+        # the file, and any line appended in between is gone: the failure log
+        # losing the failure it exists to record, at the exact moment several
+        # things are going wrong at once. The lock is a sidecar file because the
+        # rewrite commits with os.replace(), so the log's inode changes and a
+        # lock held on it would not exclude the next writer.
+        lock_fd = None
         try:
-            if os.path.getsize(SHIELD_ERROR_LOG) > SHIELD_ERROR_LOG_MAX_BYTES:
-                with open(SHIELD_ERROR_LOG) as f:
-                    tail = f.readlines()[-SHIELD_ERROR_LOG_KEEP_LINES:]
-                with open(SHIELD_ERROR_LOG, "w") as f:
-                    f.writelines(tail)
+            lock_fd = os.open(SHIELD_ERROR_LOG_LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
         except OSError:
-            pass
-        fd = os.open(SHIELD_ERROR_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
-            f.write(line)
+            if lock_fd is not None:
+                os.close(lock_fd)
+                lock_fd = None
+        try:
+            tmp_path = None
+            try:
+                if os.path.getsize(SHIELD_ERROR_LOG) > SHIELD_ERROR_LOG_MAX_BYTES:
+                    with open(SHIELD_ERROR_LOG) as f:
+                        tail = f.readlines()[-SHIELD_ERROR_LOG_KEEP_LINES:]
+                    fd, tmp_path = tempfile.mkstemp(
+                        dir=log_dir, prefix=".restore-errors.", suffix=".tmp")
+                    with os.fdopen(fd, "w") as f:
+                        f.writelines(tail)
+                    os.replace(tmp_path, SHIELD_ERROR_LOG)
+                    tmp_path = None
+            except OSError:
+                pass
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+            fd = os.open(SHIELD_ERROR_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a") as f:
+                f.write(line)
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
         debug_log(f"Recorded shield failure ({kind}) in {SHIELD_ERROR_LOG}")
     except Exception:
         pass
@@ -882,6 +919,7 @@ try:
     debug_log(f"Hook start: tool={tool_name} post={is_post_hook} session={session_id}")
 
     MAPPING_FILE = GLOBAL_MAPPING_PATH
+    MAPPING_LOCK_FILE = GLOBAL_MAPPING_PATH + ".lock"
     BACKUP_DIR = os.path.join(tempfile.gettempdir(), f".claude-backup-{session_id}")
 
 
@@ -996,6 +1034,88 @@ try:
     def vault_is_unreadable(mapping):
         return bool(mapping) and bool(mapping.get(VAULT_UNREADABLE))
 
+    # A mapping file that exists and is zero bytes is NOT a clean first run.
+    # `save_mapping` used to open the real path with O_TRUNC, so a writer killed
+    # between the open and the write left exactly this: the file present, the
+    # vault gone. Reading that as "nothing here yet" restarts the vault from
+    # empty and orphans every placeholder already written into a file — the same
+    # loss as the incident above, reached by a crash instead of by a crypto-less
+    # interpreter. The atomic commit below means this code can no longer CREATE
+    # such a file, but one may already be on disk, and other writers exist
+    # (an interrupted editor, a `touch`, a restore from a truncated backup).
+    ZERO_BYTE_REASON = (
+        "mapping file exists but is zero bytes — a writer was interrupted, or "
+        "something else truncated it. An empty file is not an empty vault. If "
+        "this vault genuinely never held anything, move the file aside and the "
+        "next run will create a new one"
+    )
+
+    def _read_mapping_file():
+        """Read and decode whatever is on disk.
+
+        Returns (data, None) when the mapping was read, ({}, None) when there is
+        genuinely nothing there, and (None, reason) when a file exists but could
+        not be interpreted. Records nothing — callers decide what a failure
+        means, which is what lets `save_mapping` re-read under its own lock
+        without emitting a second alarm for the same file.
+        """
+        path = MAPPING_FILE
+        try:
+            if not os.path.exists(path):
+                # Genuinely nothing here yet. The skeleton matters: callers
+                # index the two tables directly.
+                return {"secret_to_placeholder": {}, "placeholder_to_secret": {}}, None
+            # Permission enforcement: fix group/other access
+            st = os.stat(path)
+            if st.st_mode & 0o077:
+                os.chmod(path, 0o600)
+            with open(path, 'rb') as f:
+                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+                raw = f.read()
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except (OSError, PermissionError) as e:
+            return None, f"{type(e).__name__} while reading mapping"
+
+        if not raw:
+            return None, ZERO_BYTE_REASON
+
+        data = None
+        if FERNET:
+            try:
+                data = json.loads(FERNET.decrypt(raw))
+            except Exception:
+                # Fallback: try reading as plaintext (migration from unencrypted)
+                try:
+                    data = json.loads(raw)
+                    debug_log("Loaded plaintext mapping, will re-save encrypted")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return None, ("mapping decrypts with neither the derived key nor "
+                                  "as plaintext JSON")
+        else:
+            # No Fernet in this interpreter. Plaintext mode is only legitimate
+            # when what is on disk is ALSO plaintext; an encrypted vault read by
+            # a crypto-less interpreter is unreadable, not empty.
+            try:
+                data = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                return None, ("mapping is encrypted but `cryptography` is unavailable "
+                              "to this interpreter, so it cannot be read")
+
+        # Valid JSON that is not an object decodes fine and then fails on the
+        # first .pop(), which the outer fail-open would swallow. It is still a
+        # vault nobody can read.
+        if not isinstance(data, dict):
+            return None, f"mapping decoded to {type(data).__name__}, not an object"
+
+        data.pop("counters", None)
+        data.setdefault("secret_to_placeholder", {})
+        data.setdefault("placeholder_to_secret", {})
+        if not isinstance(data["secret_to_placeholder"], dict) or \
+                not isinstance(data["placeholder_to_secret"], dict):
+            return None, "mapping object does not hold the two expected tables"
+        return data, None
+
+
     def load_mapping():
         """Load the global mapping file (encrypted if Fernet available).
 
@@ -1003,67 +1123,55 @@ try:
         mapping carrying VAULT_UNREADABLE when a file exists but could not be
         interpreted — see the note above for why the distinction matters.
         """
-        path = MAPPING_FILE
+        data, reason = _read_mapping_file()
+        if reason is not None:
+            return _unreadable_vault(reason)
+        return data
+
+
+    def _mapping_lock():
+        """Exclusive lock covering read-merge-write on the mapping.
+
+        A sidecar file, not the mapping itself: the write commits with
+        os.replace(), so the mapping's inode changes underneath. A writer
+        holding a lock on the old inode and the next writer opening the new one
+        would both believe they held it.
+        """
+        fd = os.open(MAPPING_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            if os.path.exists(path):
-                # Permission enforcement: fix group/other access
-                st = os.stat(path)
-                if st.st_mode & 0o077:
-                    os.chmod(path, 0o600)
-                with open(path, 'rb') as f:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                    raw = f.read()
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-                # Try decrypting (Fernet encrypted)
-                if FERNET and raw:
-                    try:
-                        decrypted = FERNET.decrypt(raw)
-                        data = json.loads(decrypted)
-                    except Exception:
-                        # Fallback: try reading as plaintext (migration from unencrypted)
-                        try:
-                            data = json.loads(raw)
-                            debug_log("Loaded plaintext mapping, will re-save encrypted")
-                        except (json.JSONDecodeError, UnicodeDecodeError):
-                            return _unreadable_vault(
-                                "mapping decrypts with neither the derived key nor as plaintext JSON"
-                            )
-                elif raw:
-                    # No Fernet in this interpreter. Plaintext mode is only
-                    # legitimate when what is on disk is ALSO plaintext; an
-                    # encrypted vault read by a crypto-less interpreter is
-                    # unreadable, not empty.
-                    try:
-                        data = json.loads(raw)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        return _unreadable_vault(
-                            "mapping is encrypted but `cryptography` is unavailable to this "
-                            "interpreter, so it cannot be read"
-                        )
-                else:
-                    data = {}
-
-                data.pop("counters", None)
-                data.setdefault("secret_to_placeholder", {})
-                data.setdefault("placeholder_to_secret", {})
-                return data
-        except (json.JSONDecodeError, OSError, PermissionError, UnicodeDecodeError) as e:
-            # A file that exists but cannot be read is the dangerous case: an
-            # unreadable vault must never be treated as an absent one.
-            try:
-                if os.path.exists(MAPPING_FILE) and os.path.getsize(MAPPING_FILE) > 0:
-                    return _unreadable_vault(f"{type(e).__name__} while reading mapping")
-            except OSError:
-                return _unreadable_vault("mapping exists but its size could not be determined")
-        return {"secret_to_placeholder": {}, "placeholder_to_secret": {}}
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            os.close(fd)
+            raise
+        return fd
 
 
     def save_mapping(mapping):
-        """Persist the global mapping file (encrypted) with restricted permissions and LRU eviction."""
-        # Refuse to write over a vault we could not read. This open() carries
-        # O_TRUNC, so without this guard a degraded load silently replaces every
-        # entry with whatever this one invocation happened to collect.
+        """Persist the global mapping: merge with disk under lock, then commit
+        atomically. Encrypted, 0600, with LRU eviction.
+
+        Two separate hazards, and the mapping is append-only in practice, which
+        is what makes one answer serve both:
+
+        1. Overwriting a vault nobody could read (the incident above).
+        2. Overwriting a vault someone else just wrote. Hook processes run
+           concurrently — one per tool call, and tool calls are issued in
+           parallel. A gets the mapping, B gets the same mapping, both mint a
+           placeholder, both save; whoever writes second wins and the other's
+           entry is gone, while the file it redacted keeps the placeholder. Not
+           a new bug — it predates the unreadable-vault work — but it is the
+           same ending: a placeholder on disk that nothing can resolve.
+
+        So this re-reads the mapping under an exclusive lock and merges into it
+        rather than trusting the copy the caller loaded. Merging is sound here
+        because placeholder names are deterministic HMACs of the secret: two
+        processes that mint an entry for the same secret produce the same
+        entry, and entries are only ever added. The alternative — holding one
+        lock across the caller's whole load/mutate/save — would put arbitrary
+        file I/O inside the critical section, and one hook dying in there wedges
+        every other hook on the machine.
+        """
+        # Refuse to write over a vault we could not read.
         if vault_is_unreadable(mapping):
             record_shield_failure(
                 "vault-save-refused",
@@ -1072,18 +1180,74 @@ try:
                 action="refused to overwrite an unreadable mapping",
             )
             return
+
+        lock_fd = None
+        tmp_path = None
         try:
+            dir_name = os.path.dirname(MAPPING_FILE) or "."
+            os.makedirs(dir_name, exist_ok=True)
+            lock_fd = _mapping_lock()
+
+            # Re-read INSIDE the lock. The caller's copy may be minutes old.
+            disk, reason = _read_mapping_file()
+            if reason is not None:
+                # It was readable when the caller loaded it and is not now, or
+                # the caller never read it at all. Either way, writing here
+                # would destroy whatever is actually there.
+                record_shield_failure(
+                    "vault-save-refused",
+                    reason=scrub_secrets(reason),
+                    path=MAPPING_FILE,
+                    action="refused to overwrite a mapping that became unreadable",
+                )
+                return
+
+            reserved = ("secret_to_placeholder", "placeholder_to_secret",
+                        "counters", VAULT_UNREADABLE)
+            merged_s2p = dict(disk.get("secret_to_placeholder", {}))
+            merged_p2s = dict(disk.get("placeholder_to_secret", {}))
+
+            # Disk wins on conflict. A placeholder already bound on disk may
+            # already be written into files this process never saw; rebinding
+            # it would make those restore to the wrong secret.
+            collisions = []
+            for ph, sec in mapping.get("placeholder_to_secret", {}).items():
+                if ph not in merged_p2s:
+                    merged_p2s[ph] = sec
+                elif merged_p2s[ph] != sec:
+                    collisions.append(ph)
+            for sec, ph in mapping.get("secret_to_placeholder", {}).items():
+                merged_s2p.setdefault(sec, ph)
+            if collisions:
+                # Needs an 8-hex HMAC collision AND concurrency, so this should
+                # never fire. If it ever does, a file this process just redacted
+                # holds a placeholder that resolves to a different secret, and
+                # only a human can sort that out. Names are safe to log; values
+                # are not, and none are logged.
+                record_shield_failure(
+                    "placeholder_collision",
+                    path=MAPPING_FILE,
+                    placeholders=sorted(collisions)[:20],
+                    action="kept the binding already on disk",
+                )
+
+            merged = {k: v for k, v in disk.items() if k not in reserved}
+            for k, v in mapping.items():
+                if k not in reserved:
+                    merged[k] = v
+            merged["secret_to_placeholder"] = merged_s2p
+            merged["placeholder_to_secret"] = merged_p2s
+
             # Evict oldest entries if over limit
-            if len(mapping.get("secret_to_placeholder", {})) > MAX_MAPPING_ENTRIES:
-                entries = list(mapping["secret_to_placeholder"].items())
+            if len(merged_s2p) > MAX_MAPPING_ENTRIES:
+                entries = list(merged_s2p.items())
                 keep = entries[len(entries) // 2:]
-                mapping["secret_to_placeholder"] = dict(keep)
-                mapping["placeholder_to_secret"] = {v: k for k, v in mapping["secret_to_placeholder"].items()}
+                merged["secret_to_placeholder"] = dict(keep)
+                merged["placeholder_to_secret"] = {
+                    v: k for k, v in merged["secret_to_placeholder"].items()}
                 debug_log(f"Evicted {len(entries) - len(keep)} old mapping entries")
 
-            mapping.pop("counters", None)
-
-            json_bytes = json.dumps(mapping).encode('utf-8')
+            json_bytes = json.dumps(merged).encode('utf-8')
 
             # Encrypt if Fernet available
             if FERNET:
@@ -1091,15 +1255,58 @@ try:
             else:
                 payload = json_bytes
 
-            os.makedirs(os.path.dirname(MAPPING_FILE), exist_ok=True)
-            fd = os.open(MAPPING_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            # Temp file, fsync, atomic rename. The old code opened the real path
+            # with O_TRUNC and wrote in place, so any death between the two —
+            # a kill, a full disk, a crash — left a zero-byte or half-written
+            # vault where a complete one had been. A rename is all-or-nothing:
+            # a reader sees the previous mapping or the new one, never neither.
+            fd, tmp_path = tempfile.mkstemp(
+                dir=dir_name, prefix=".redact-mapping.", suffix=".tmp")
             with os.fdopen(fd, "wb") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                os.fchmod(f.fileno(), 0o600)  # mkstemp is 0600; be explicit
                 f.write(payload)
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            debug_log(f"Mapping saved ({'encrypted' if FERNET else 'plaintext'}): {len(mapping.get('secret_to_placeholder', {}))} secrets")
-        except OSError:
-            pass
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, MAPPING_FILE)
+            tmp_path = None
+            try:
+                dir_fd = os.open(dir_name, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)  # so the rename itself survives power loss
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+
+            # Hand the merged view back to the caller: it may go on to restore
+            # content, and entries another process minted are entries it can
+            # now resolve.
+            mapping["secret_to_placeholder"] = merged["secret_to_placeholder"]
+            mapping["placeholder_to_secret"] = merged["placeholder_to_secret"]
+            mapping.pop("counters", None)
+            debug_log(f"Mapping saved ({'encrypted' if FERNET else 'plaintext'}): {len(merged.get('secret_to_placeholder', {}))} secrets")
+        except OSError as e:
+            # Silence is how the original incident ran undetected. A save that
+            # did not happen means placeholders minted in this invocation are
+            # unresolvable, which is worth a line in the log.
+            record_shield_failure(
+                "vault-save-failed",
+                reason=scrub_secrets(f"{type(e).__name__}: {e}"),
+                path=MAPPING_FILE,
+                action="mapping left as it was; placeholders minted in this "
+                       "invocation may be unresolvable",
+            )
+        finally:
+            if tmp_path:
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
 
 
     def get_placeholder(mapping, secret_value, pattern_name):
@@ -1367,7 +1574,7 @@ try:
 
     def restore_read_from_foreign_backup(file_path):
         """Put back a redacted file whose backup landed in another session's
-        directory. Returns "restored", "mismatch", or None.
+        directory. Returns "restored", "mismatch", "vault_unreadable", or None.
 
         Deliberately NOT a mapping-based restore. Expanding every placeholder
         found in a file the user merely READ would rewrite files this hook
@@ -1407,6 +1614,16 @@ try:
             return None  # nothing was redacted
 
         mapping = load_mapping()
+        if vault_is_unreadable(mapping):
+            # The proof below re-redacts the backup and compares. With the vault
+            # unreadable, redact_content is a pass-through, so the comparison
+            # always fails and reports "mismatch" — the right refusal (an
+            # unverified backup must not be copied over somebody's file) for
+            # entirely the wrong reason. The backup may be perfect; what is
+            # broken is the mapping, and that is the thing worth telling
+            # someone, because it is also the thing they can fix.
+            debug_log(f"Vault unreadable, cannot verify foreign backup: {file_path}")
+            return "vault_unreadable"
         redacted, _found = redact_content(
             original_bytes.decode("utf-8", errors="replace"), mapping
         )
@@ -1662,16 +1879,28 @@ try:
                 # restored on write" is the contract the user was given.
                 if tool_name == "Read":
                     outcome = restore_read_from_foreign_backup(file_path)
-                    if outcome == "mismatch":
+                    if outcome in ("mismatch", "vault_unreadable"):
+                        # Same outcome, two different causes, and reporting the
+                        # wrong one sends whoever reads this looking for a stale
+                        # backup when the actual fault is a mapping they cannot
+                        # read — which is repairable, and which is also
+                        # disabling the shield everywhere else right now.
+                        cause = (
+                            "the secret mapping could not be read, so the backup "
+                            "could not be verified against the file"
+                            if outcome == "vault_unreadable"
+                            else "the backup no longer matches the file"
+                        )
                         record_shield_failure(
                             "unrestorable_read",
                             path=file_path,
-                            context="Read (backup found but did not match)",
+                            context=f"Read ({cause})",
+                            cause=outcome,
                         )
                         queue_post_warning(
                             f"[claude-secret-shield] {file_path} was redacted "
-                            f"for a Read and could not be restored: the backup "
-                            f"no longer matches the file. It may still hold "
+                            f"for a Read and could not be restored: {cause}. "
+                            f"It may still hold "
                             f"`{{{{NAME_hash}}}}` placeholders where real values "
                             f"belong. Check it before committing. "
                             f"Details: {SHIELD_ERROR_LOG}"
