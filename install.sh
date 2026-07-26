@@ -197,7 +197,13 @@ chmod +x "$HOOKS_DIR/image_compressor.py"
 install_file "hooks/cheatsheet.py"        "$HOOKS_DIR/cheatsheet.py"
 install_file "hooks/git_guard.py"         "$HOOKS_DIR/git_guard.py"
 chmod +x "$HOOKS_DIR/git_guard.py"
-echo "  OK: Dispatcher + catchup + image compressor + cheatsheet installed"
+# The dispatcher imports this unconditionally. Leaving it out does not fail the
+# install — the import error is caught — so the guard simply does not exist in
+# any real installation while its 64 tests go on passing against the module in
+# the repo. Found by running the installed dispatcher and reading its stderr:
+# `[redmem] deploy config guard error: No module named 'deploy_config_guard'`.
+install_file "hooks/deploy_config_guard.py" "$HOOKS_DIR/deploy_config_guard.py"
+echo "  OK: Dispatcher + catchup + image compressor + cheatsheet + guards installed"
 
 # ── Autopilot module + slash commands ───────────────────────────────────
 echo "  -> Installing autopilot module..."

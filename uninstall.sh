@@ -59,7 +59,8 @@ echo ""
 removed_count=0
 for f in redact-restore.py patterns.py redact-secrets.sh custom-patterns.example.py \
          mask-output.py statusline.sh redmem_dispatcher.py redmem_catchup.py \
-         image_compressor.py cheatsheet.py git_guard.py secret_ops_guard.py; do
+         image_compressor.py cheatsheet.py git_guard.py secret_ops_guard.py \
+         deploy_config_guard.py; do
   if [ -f "$HOOKS_DIR/$f" ]; then
     rm "$HOOKS_DIR/$f"
     removed_count=$((removed_count + 1))

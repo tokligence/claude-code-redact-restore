@@ -141,6 +141,42 @@ def test_a_users_own_hook_with_a_similar_path_is_left_alone(installed):
     )
 
 
+def test_the_installed_dispatcher_can_import_everything_it_routes_to(installed):
+    """A module the dispatcher imports but the installer never copies fails
+    SILENTLY: the import error is caught, the install reports success, and the
+    handler simply does not exist — while its unit tests go on passing against
+    the copy in the repo.
+
+    That is not hypothetical. `deploy_config_guard.py` shipped with 64 tests and
+    was absent from every real installation until the installed dispatcher was
+    run by hand and its stderr read:
+        [redmem] deploy config guard error: No module named 'deploy_config_guard'
+
+    Testing the file list would only restate it. Running the thing is what
+    catches the next one.
+    """
+    home, _ = installed
+    dispatcher = os.path.join(home, ".claude", "hooks", "redmem_dispatcher.py")
+    assert os.path.exists(dispatcher)
+
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Read",
+        "tool_input": {"file_path": os.path.join(str(home), "nonexistent.txt")},
+        "session_id": "install-import-check",
+        "cwd": str(home),
+    }
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    proc = subprocess.run([sys.executable, dispatcher], input=json.dumps(payload),
+                          capture_output=True, text=True, env=env, timeout=60)
+
+    assert "No module named" not in proc.stderr, (
+        f"the installed dispatcher cannot import one of its handlers:\n{proc.stderr[:800]}"
+    )
+    assert "ImportError" not in proc.stderr, proc.stderr[:800]
+
+
 @pytest.mark.parametrize("foreign", [
     # The tail collides, but the directory is not ours. `.claude` has to be a
     # whole path segment: anchoring on the bare string `.claude/hooks/` still
