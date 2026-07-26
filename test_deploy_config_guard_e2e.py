@@ -26,12 +26,32 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 DISPATCHER = os.path.join(REPO, "hooks", "redmem_dispatcher.py")
 INSTALL_SH = os.path.join(REPO, "install.sh")
+
+# These tests drive the REAL dispatcher, which means the real secret shield runs
+# in the child. Handing it the developer's real HOME points it at the real
+# `~/.claude/.redact-mapping.json`, and that vault is destroyable: `save_mapping`
+# opens with O_TRUNC, so one child that cannot read the mapping (no
+# `cryptography` in whichever interpreter `sys.executable` happens to be)
+# replaces every entry with the one or two it just minted.
+#
+# That is not hypothetical. It happened: a 235-entry encrypted vault came back
+# as 6 plaintext entries mid-session, and this file's `dict(os.environ)` was one
+# of the ways a test could reach it. The hook now refuses to overwrite a mapping
+# it could not read, but a test suite must not depend on the fix for the thing
+# it is testing — so the tests never see the real HOME either.
+#
+# TMPDIR goes with it: BACKUP_DIR derives from `tempfile.gettempdir()`, so a
+# shared TMPDIR lets these children collide with the developer's live backups.
+_SANDBOX = tempfile.mkdtemp(prefix="redmem-e2e-home-")
+os.makedirs(os.path.join(_SANDBOX, "home", ".claude"), exist_ok=True)
+os.makedirs(os.path.join(_SANDBOX, "tmp"), exist_ok=True)
 
 
 def _run(payload: dict, env_extra: dict | None = None):
@@ -52,6 +72,8 @@ def _run(payload: dict, env_extra: dict | None = None):
         )
     env = dict(os.environ)
     env.pop("REDMEM_ALLOW_DEPLOY_CONFIG", None)
+    env["HOME"] = os.path.join(_SANDBOX, "home")
+    env["TMPDIR"] = os.path.join(_SANDBOX, "tmp")
     if env_extra:
         env.update(env_extra)
     proc = subprocess.run(

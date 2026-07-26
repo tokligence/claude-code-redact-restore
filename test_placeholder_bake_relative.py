@@ -35,8 +35,23 @@ import pytest
 REPO = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(REPO, "hooks", "redact-restore.py")
 
-SECRET = "postgresql://redmem:pass@localhost:5432/redmem"
-PLACEHOLDER = "{{POSTGRES_URL_7bf1817a}}"
+# These two MUST stay synthetic, and the reason is not style.
+#
+# This file first used a real-looking DSN with a placeholder name derived from
+# it, which made both of them *live*:
+#   - Reading this file made the shield recognise the DSN as a secret and write
+#     it into the developer's real mapping. Deleting that entry by hand could
+#     never stick: the next read of this file put it straight back.
+#   - Once the entry existed the placeholder below resolved, so any Bash command
+#     naming this file would hit the very restore pass tested here and rewrite
+#     the line with the real value, in a tracked file of a public repository.
+#     The mechanism under test would have leaked through its own test.
+#
+# restore_content() is a plain mapping-driven string replace, so these values
+# only have to be unique, never realistic. Keep them unrecognisable to every
+# detector and impossible to collide with a generated placeholder name.
+SECRET = "sentinel-restore-target-not-a-secret-3f9ac1"
+PLACEHOLDER = "{{TEST_ONLY_SENTINEL_00000000}}"
 
 
 @pytest.fixture

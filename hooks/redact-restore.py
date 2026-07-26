@@ -279,6 +279,142 @@ for name, regex in SECRET_PATTERNS:
     except re.error:
         pass
 
+# ── Placeholder shape ────────────────────────────────────────────────────
+# `{{NAME_deadbeef}}` — an 8-hex HMAC digest, with `x` appended on the
+# (unlikely) collision path in get_placeholder().
+PLACEHOLDER_RE = re.compile(r'\{\{[A-Z0-9_]+_[a-f0-9]{8}x*\}\}')
+
+
+# ── Failure evidence ─────────────────────────────────────────────────────
+# This hook fails open on purpose: a bug in it must never block the user's
+# work. But a fail-open branch that leaves no evidence is indistinguishable
+# from one that works. That is not hypothetical — a NameError inside the
+# restore path once disabled the entire protection, absolute paths included,
+# and the only trace was a single stderr line nobody reads.
+#
+# So every failure gets recorded twice, because the two records fail
+# differently:
+#   - a durable JSON line here, which survives the session and can be
+#     grepped after the fact ("when did this start?");
+#   - an in-band PostToolUse warning, which is what somebody actually sees
+#     at the moment the file on disk is wrong and still fixable.
+SHIELD_ERROR_LOG = os.path.expanduser("~/.claude/vault/restore-errors.log")
+SHIELD_ERROR_LOG_MAX_BYTES = 1_000_000
+SHIELD_ERROR_LOG_KEEP_LINES = 200
+
+
+def scrub_secrets(text, limit=500):
+    """Truncate and strip anything that looks like a secret.
+
+    The log records failures, never values. Placeholder NAMES are safe by
+    construction; an exception message that happens to quote file content
+    is not.
+    """
+    try:
+        out = str(text)[:limit]
+        for _name, compiled in COMPILED_PATTERNS:
+            out = compiled.sub("<redacted>", out)
+        return out
+    except Exception:
+        return "<unprintable>"
+
+
+def record_shield_failure(kind, **fields):
+    """Append one JSON line to ~/.claude/vault/restore-errors.log.
+
+    Never raises — this is the thing that runs when everything else already
+    went wrong.
+    """
+    try:
+        entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "kind": kind}
+        entry.update(fields)
+        line = json.dumps(entry, default=str) + "\n"
+        os.makedirs(os.path.dirname(SHIELD_ERROR_LOG), mode=0o700, exist_ok=True)
+        try:
+            if os.path.getsize(SHIELD_ERROR_LOG) > SHIELD_ERROR_LOG_MAX_BYTES:
+                with open(SHIELD_ERROR_LOG) as f:
+                    tail = f.readlines()[-SHIELD_ERROR_LOG_KEEP_LINES:]
+                with open(SHIELD_ERROR_LOG, "w") as f:
+                    f.writelines(tail)
+        except OSError:
+            pass
+        fd = os.open(SHIELD_ERROR_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line)
+        debug_log(f"Recorded shield failure ({kind}) in {SHIELD_ERROR_LOG}")
+    except Exception:
+        pass
+
+
+_POST_WARNINGS = []
+
+
+def queue_post_warning(text):
+    """Hold a message for the single PostToolUse JSON response."""
+    if text not in _POST_WARNINGS:
+        _POST_WARNINGS.append(text)
+
+
+def flush_post_warnings():
+    """Emit queued warnings as PostToolUse additionalContext.
+
+    additionalContext is the only channel from a PostToolUse hook that
+    reaches the conversation, and reaching the conversation is the entire
+    point: the file on disk is wrong right now, and the person who can act
+    on that is reading this transcript.
+    """
+    if not _POST_WARNINGS:
+        return
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": "\n\n".join(_POST_WARNINGS),
+        }
+    }))
+    del _POST_WARNINGS[:]
+
+
+def report_crash(exc):
+    """Record + announce a crash that the fail-open handler swallowed."""
+    import traceback
+
+    event, tool, path = "", "", ""
+    try:
+        payload = input_data if isinstance(input_data, dict) else {}
+        event = payload.get("hook_event_name", "") or ""
+        tool = payload.get("tool_name", "") or ""
+        tool_in = payload.get("tool_input")
+        if isinstance(tool_in, dict):
+            path = tool_in.get("file_path", "") or ""
+        is_post = (
+            event == "PostToolUse"
+            or "tool_result" in payload
+            or "tool_response" in payload
+        )
+    except Exception:
+        is_post = False
+
+    record_shield_failure(
+        "exception",
+        hook_event=event,
+        tool=tool,
+        path=path,
+        error=scrub_secrets(f"{exc.__class__.__name__}: {exc}"),
+        traceback=scrub_secrets(traceback.format_exc()[-2000:], limit=2000),
+    )
+
+    if is_post:
+        queue_post_warning(
+            "[claude-secret-shield] The placeholder-restore pass for this tool "
+            f"call crashed ({scrub_secrets(exc.__class__.__name__, 80)}), so it "
+            "did not run. Any file this call touched may still hold a "
+            "`{{NAME_hash}}` placeholder instead of the real value — check it "
+            "before committing or deploying, and tell the user. "
+            f"Details: {SHIELD_ERROR_LOG}"
+        )
+        flush_post_warnings()
+
+
 # ── Binary file detection ────────────────────────────────────────────────
 def is_binary_file(file_path):
     """Return True if the file appears to be binary (contains null bytes in first 8KB)."""
@@ -828,8 +964,45 @@ try:
 
 
     # ── Mapping management ───────────────────────────────────────────────────
+    # Sentinel key marking a mapping that could NOT be read off disk. It is not
+    # the same thing as an empty mapping, and conflating the two destroys data:
+    #
+    #   `save_mapping` opens with O_TRUNC. So "load failed -> empty mapping" plus
+    #   "redact one secret" plus "save" replaces the whole vault with the one or
+    #   two entries this invocation happened to create. Reproduced: a 50-entry
+    #   encrypted mapping went to 2 plaintext entries from a single Read event,
+    #   the only precondition being an interpreter without `cryptography` (FERNET
+    #   is None, the encrypted bytes fail json.loads, the outer handler returns
+    #   empty). Every placeholder already baked into a file becomes permanently
+    #   unresolvable, and the surviving entries land in plaintext.
+    #
+    # So an unreadable vault must (a) never be saved over, and (b) stop redaction
+    # for this invocation. (b) is not optional: redacting while unable to persist
+    # writes placeholders that nothing can ever restore, which is worse than not
+    # redacting at all. Passing content through unchanged loses the shield for
+    # one invocation; the alternative corrupts files permanently.
+    VAULT_UNREADABLE = "_vault_unreadable"
+
+    def _unreadable_vault(reason):
+        record_shield_failure(
+            "vault-unreadable",
+            reason=scrub_secrets(reason),
+            path=MAPPING_FILE,
+            action="mapping left untouched; redaction disabled for this invocation",
+        )
+        return {"secret_to_placeholder": {}, "placeholder_to_secret": {},
+                VAULT_UNREADABLE: reason}
+
+    def vault_is_unreadable(mapping):
+        return bool(mapping) and bool(mapping.get(VAULT_UNREADABLE))
+
     def load_mapping():
-        """Load the global mapping file (encrypted if Fernet available). Returns empty mapping on any error."""
+        """Load the global mapping file (encrypted if Fernet available).
+
+        Returns an empty mapping when there is genuinely nothing on disk, and a
+        mapping carrying VAULT_UNREADABLE when a file exists but could not be
+        interpreted — see the note above for why the distinction matters.
+        """
         path = MAPPING_FILE
         try:
             if os.path.exists(path):
@@ -853,22 +1026,52 @@ try:
                             data = json.loads(raw)
                             debug_log("Loaded plaintext mapping, will re-save encrypted")
                         except (json.JSONDecodeError, UnicodeDecodeError):
-                            return {"secret_to_placeholder": {}, "placeholder_to_secret": {}}
+                            return _unreadable_vault(
+                                "mapping decrypts with neither the derived key nor as plaintext JSON"
+                            )
+                elif raw:
+                    # No Fernet in this interpreter. Plaintext mode is only
+                    # legitimate when what is on disk is ALSO plaintext; an
+                    # encrypted vault read by a crypto-less interpreter is
+                    # unreadable, not empty.
+                    try:
+                        data = json.loads(raw)
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        return _unreadable_vault(
+                            "mapping is encrypted but `cryptography` is unavailable to this "
+                            "interpreter, so it cannot be read"
+                        )
                 else:
-                    # No Fernet: plaintext mode
-                    data = json.loads(raw)
+                    data = {}
 
                 data.pop("counters", None)
                 data.setdefault("secret_to_placeholder", {})
                 data.setdefault("placeholder_to_secret", {})
                 return data
-        except (json.JSONDecodeError, OSError, PermissionError, UnicodeDecodeError):
-            pass
+        except (json.JSONDecodeError, OSError, PermissionError, UnicodeDecodeError) as e:
+            # A file that exists but cannot be read is the dangerous case: an
+            # unreadable vault must never be treated as an absent one.
+            try:
+                if os.path.exists(MAPPING_FILE) and os.path.getsize(MAPPING_FILE) > 0:
+                    return _unreadable_vault(f"{type(e).__name__} while reading mapping")
+            except OSError:
+                return _unreadable_vault("mapping exists but its size could not be determined")
         return {"secret_to_placeholder": {}, "placeholder_to_secret": {}}
 
 
     def save_mapping(mapping):
         """Persist the global mapping file (encrypted) with restricted permissions and LRU eviction."""
+        # Refuse to write over a vault we could not read. This open() carries
+        # O_TRUNC, so without this guard a degraded load silently replaces every
+        # entry with whatever this one invocation happened to collect.
+        if vault_is_unreadable(mapping):
+            record_shield_failure(
+                "vault-save-refused",
+                reason=scrub_secrets(mapping.get(VAULT_UNREADABLE)),
+                path=MAPPING_FILE,
+                action="refused to overwrite an unreadable mapping",
+            )
+            return
         try:
             # Evict oldest entries if over limit
             if len(mapping.get("secret_to_placeholder", {})) > MAX_MAPPING_ENTRIES:
@@ -924,6 +1127,11 @@ try:
         Returns (redacted_content, found_any_secrets).
         The mapping is mutated in place and must be saved by the caller.
         """
+        # The caller cannot save, so any placeholder minted here would be
+        # written to disk with nothing able to restore it. Pass through.
+        if vault_is_unreadable(mapping):
+            return content, False
+
         # Collect all matches with their positions first
         matches = []
         for pattern_name, compiled in COMPILED_PATTERNS:
@@ -1069,6 +1277,199 @@ try:
         debug_log(f"Backup cleaned up: {file_path}")
 
 
+    def restore_placeholders_in_file(file_path, mapping=None):
+        """Replace every live placeholder in `file_path` with its real value.
+
+        The backup-free counterpart to the `.bak` restore, for Write and Edit:
+        there the placeholder came from the tool call, and restoring it is the
+        contract the user was given ("use placeholders as-is — they are
+        restored on write"). A backup is an optimisation, and the paths where
+        it is missing (a Write creating a file, an Edit on a previously clean
+        file) used to end with the placeholder sitting on disk.
+
+        NOT for Read — see restore_read_from_foreign_backup for why.
+
+        `mapping` is loaded lazily, only once the file is known to contain
+        something placeholder-shaped, so an ordinary file costs one read and
+        one regex.
+
+        Returns the mapping when a restore was attempted, None when there was
+        nothing to do. The caller needs it to verify the outcome.
+        """
+        if not file_path or not os.path.isfile(file_path):
+            return None
+        try:
+            if is_binary_file(file_path):
+                return None
+            with open(file_path, "r", errors="replace") as f:
+                current = f.read()
+        except (OSError, PermissionError):
+            return None
+        if not PLACEHOLDER_RE.search(current):
+            return None
+
+        if mapping is None:
+            mapping = load_mapping()
+        if not mapping.get("placeholder_to_secret"):
+            return mapping
+
+        restored = restore_content(current, mapping)
+        if restored == current:
+            return mapping
+        try:
+            with open(file_path, "w") as f:
+                f.write(restored)
+            debug_log(f"Restored placeholders without a backup: {file_path}")
+        except (OSError, PermissionError):
+            debug_log(f"Could not write restored content: {file_path}")
+        return mapping
+
+
+    def find_foreign_backup(file_path):
+        """Locate a backup for `file_path` filed under a DIFFERENT session id.
+
+        `BACKUP_DIR` is keyed by session_id, but PreToolUse and PostToolUse do
+        not always carry the same one — a subagent boundary is enough. When
+        they differ the backup is real, just in the sibling directory, and
+        Read's restore (the only thing that ever puts a redacted file back)
+        silently does nothing.
+
+        The filename is a hash of the path and carries no session component,
+        so the sibling is findable by name. Returns (bak_path, meta) or
+        (None, None).
+        """
+        path_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
+        parent = tempfile.gettempdir()
+        try:
+            entries = sorted(os.listdir(parent))
+        except OSError:
+            return None, None
+        for name in entries:
+            if not name.startswith(".claude-backup-"):
+                continue
+            d = os.path.join(parent, name)
+            if os.path.abspath(d) == os.path.abspath(BACKUP_DIR):
+                continue
+            bak = os.path.join(d, path_hash + ".bak")
+            if not os.path.isfile(bak):
+                continue
+            meta = {}
+            try:
+                with open(os.path.join(d, path_hash + ".meta")) as f:
+                    meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                pass
+            if meta.get("original_path") and meta["original_path"] != file_path:
+                continue  # hash collision, not our file
+            return bak, meta
+        return None, None
+
+
+    def restore_read_from_foreign_backup(file_path):
+        """Put back a redacted file whose backup landed in another session's
+        directory. Returns "restored", "mismatch", or None.
+
+        Deliberately NOT a mapping-based restore. Expanding every placeholder
+        found in a file the user merely READ would rewrite files this hook
+        never redacted — and a live placeholder does occur at rest in prose
+        and in test fixtures. Turning one of those into its real secret, in a
+        file nobody asked to modify, is the same accident as baking a
+        placeholder into a README, pointed the other way and with worse
+        consequences.
+
+        So this restores bytes, and only on proof: the backup must redact,
+        under the current mapping, to exactly what is on disk right now. A
+        stale backup from an abandoned session cannot reproduce the current
+        file, so it is rejected rather than used to silently revert somebody's
+        edits.
+        """
+        # Cheap check first: a file with no placeholder in it was not
+        # redacted, and this runs after every Read that has no backup — i.e.
+        # after almost every Read there is. No directory scan for those.
+        try:
+            with open(file_path, "rb") as f:
+                current_bytes = f.read()
+        except (OSError, PermissionError):
+            return None
+        current = current_bytes.decode("utf-8", errors="replace")
+        if not PLACEHOLDER_RE.search(current):
+            return None
+
+        bak, meta = find_foreign_backup(file_path)
+        if not bak:
+            return None
+        try:
+            with open(bak, "rb") as f:
+                original_bytes = f.read()
+        except (OSError, PermissionError):
+            return None
+        if current_bytes == original_bytes:
+            return None  # nothing was redacted
+
+        mapping = load_mapping()
+        redacted, _found = redact_content(
+            original_bytes.decode("utf-8", errors="replace"), mapping
+        )
+        if redacted != current:
+            debug_log(f"Foreign backup does not match current content: {file_path}")
+            return "mismatch"
+
+        try:
+            shutil.copy2(bak, file_path)
+            if "mode" in meta:
+                os.chmod(file_path, meta["mode"])
+            if "atime" in meta and "mtime" in meta:
+                os.utime(file_path, (meta["atime"], meta["mtime"]))
+        except (OSError, PermissionError):
+            return "mismatch"
+        for p in (bak, bak[:-4] + ".meta"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        debug_log(f"Restored from a foreign session's backup: {file_path}")
+        return "restored"
+
+
+    def verify_no_live_placeholders(file_path, mapping, context):
+        """Did the restore pass that just ran actually achieve anything?
+
+        Call this only where a mapping-based restore was ATTEMPTED. A
+        placeholder that is still on disk AND still resolvable is a defect by
+        definition — it is what every one of these bugs looks like from the
+        outside, whatever the cause. That makes this a detector for the whole
+        class rather than for the individual causes known today.
+
+        Placeholders with no mapping entry are prose, not failures: this
+        project's own README documents `{{OPENAI_KEY_8f3a2b1c}}`. Reporting
+        those would make the alarm not worth reading, which is the same as
+        having no alarm.
+        """
+        try:
+            with open(file_path, "r", errors="replace") as f:
+                text = f.read()
+        except (OSError, PermissionError):
+            return
+        known = mapping.get("placeholder_to_secret", {}) if mapping else {}
+        live = sorted({p for p in PLACEHOLDER_RE.findall(text) if p in known})
+        if not live:
+            return
+        record_shield_failure(
+            "residual_placeholder",
+            path=file_path,
+            context=context,
+            count=len(live),
+            placeholders=live[:20],
+        )
+        queue_post_warning(
+            f"[claude-secret-shield] {file_path} still contains "
+            f"{len(live)} placeholder(s) that the restore pass should have "
+            f"replaced ({', '.join(live[:5])}). The real values are NOT on "
+            f"disk. Do not commit or deploy this file; tell the user. "
+            f"Details: {SHIELD_ERROR_LOG}"
+        )
+
+
 
     # (TMP_SECRETS_EXCLUDES / _find_repo_root / _ensure_git_exclude now
     # defined at module level above — single source of truth for the
@@ -1201,6 +1602,7 @@ try:
                                 shutil.copy2(bak_file, file_path)
                             except OSError:
                                 pass
+                        verify_no_live_placeholders(file_path, mapping, "Edit")
                 elif tool_name == "Write":
                     # Scan for residual placeholders in the written file.
                     # Do NOT fall back to backup restore on error — the backup
@@ -1219,7 +1621,67 @@ try:
                                 debug_log(f"Write PostToolUse: restored placeholders in {file_path}")
                         except OSError:
                             debug_log(f"Write PostToolUse: could not scan {file_path}")
+                        verify_no_live_placeholders(file_path, mapping, "Write")
                 cleanup_backup(file_path)
+            else:
+                # No backup for this file. Three ordinary ways that happens,
+                # and all three ended with a placeholder on disk, because
+                # every restore above is gated on the backup existing:
+                #
+                #   Read  — PreToolUse ran under a different session id; a
+                #           subagent boundary is enough. BACKUP_DIR is
+                #           /tmp/.claude-backup-{session_id}, so the backup
+                #           is real but in another directory, and the file
+                #           stays REDACTED, permanently. This is the only one
+                #           of the three that damages a file nobody asked to
+                #           change.
+                #   Write — the file did not exist before, so there was no
+                #           pre-image to back up.
+                #   Edit  — the pre-edit file held no secret, so Edit's
+                #           PreToolUse made no backup. An edit that
+                #           *introduces* a placeholder into a clean file is
+                #           precisely the case that needs restoring.
+                #
+                # For Write and Edit the PreToolUse rewrite of
+                # content/new_string normally keeps placeholders off disk, so
+                # this is a second line of defence — but it is a reachable
+                # one: the dispatcher returns the first decision produced, so
+                # a deploy_config_guard `ask` on docker-compose.yml discards
+                # the shield's `updatedInput`, and approving it writes the
+                # original, placeholder-bearing input. A placeholder in a
+                # README is a broken doc; in docker-compose.yml it is a
+                # broken deploy.
+                #
+                # Read and Write/Edit get different repairs on purpose. Read
+                # restores BYTES from the sibling session's backup, because a
+                # Read must not change a file it was only supposed to look
+                # at; expanding placeholders by mapping would rewrite prose
+                # and test fixtures that legitimately quote one. Write/Edit
+                # restore by MAPPING, because there the placeholder came from
+                # the tool call itself and "use placeholders as-is, they are
+                # restored on write" is the contract the user was given.
+                if tool_name == "Read":
+                    outcome = restore_read_from_foreign_backup(file_path)
+                    if outcome == "mismatch":
+                        record_shield_failure(
+                            "unrestorable_read",
+                            path=file_path,
+                            context="Read (backup found but did not match)",
+                        )
+                        queue_post_warning(
+                            f"[claude-secret-shield] {file_path} was redacted "
+                            f"for a Read and could not be restored: the backup "
+                            f"no longer matches the file. It may still hold "
+                            f"`{{{{NAME_hash}}}}` placeholders where real values "
+                            f"belong. Check it before committing. "
+                            f"Details: {SHIELD_ERROR_LOG}"
+                        )
+                else:
+                    mapping = restore_placeholders_in_file(file_path)
+                    if mapping is not None:
+                        verify_no_live_placeholders(
+                            file_path, mapping, f"{tool_name} (no backup)"
+                        )
 
         # ── Bash PostToolUse: fix files that may have been written with ──────
         # ── redacted placeholders by a Bash read-modify-write script.      ──
@@ -1309,12 +1771,16 @@ try:
                             debug_log(f"Bash PostToolUse: restored placeholders in {path}")
                     except (OSError, PermissionError):
                         pass
+                    # Reached only for candidates that carried a placeholder
+                    # (the no-placeholder case `continue`s above).
+                    verify_no_live_placeholders(path, mapping, "Bash")
 
         # Auto-delete prompt artifacts after restore is complete
         if _delete_tmp_secrets_file:
             context_file = _delete_tmp_secrets_file.replace(".conf", ".prompt.txt")
             cleanup_prompt_artifacts_from_paths(_delete_tmp_secrets_file, context_file)
 
+        flush_post_warnings()
         sys.exit(0)
 
 
@@ -1585,4 +2051,10 @@ try:
 
 except Exception as e:
     print(f"redact-restore hook error: {e}", file=sys.stderr)
-    sys.exit(0)  # Fail open — don't block tool execution
+    # Fail open — don't block tool execution — but leave evidence. stderr
+    # alone made a broken restore path look exactly like a working one.
+    try:
+        report_crash(e)
+    except Exception:
+        pass
+    sys.exit(0)
