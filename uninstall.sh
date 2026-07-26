@@ -119,10 +119,10 @@ if [ -f "$SETTINGS_FILE" ] && command -v jq >/dev/null 2>&1; then
     # every tool call starts failing to spawn.
     def is_redmem_command:
       (. // "")
-      | (endswith(".claude/hooks/redmem_dispatcher.py")
-         or endswith(".claude/hooks/redact-restore.py")
-         or endswith(".claude/hooks/guard/agent_isolation_guard.py")
-         or endswith(".claude/hooks/redact-secrets.sh"));
+      | ((endswith("/.claude/hooks/redmem_dispatcher.py") or endswith("~/.claude/hooks/redmem_dispatcher.py"))
+         or (endswith("/.claude/hooks/redact-restore.py") or endswith("~/.claude/hooks/redact-restore.py"))
+         or (endswith("/.claude/hooks/guard/agent_isolation_guard.py") or endswith("~/.claude/hooks/guard/agent_isolation_guard.py"))
+         or (endswith("/.claude/hooks/redact-secrets.sh") or endswith("~/.claude/hooks/redact-secrets.sh")));
 
     def is_redmem_hook:
       any((.hooks // [])[].command?; is_redmem_command)

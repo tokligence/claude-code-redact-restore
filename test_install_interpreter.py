@@ -141,6 +141,59 @@ def test_a_users_own_hook_with_a_similar_path_is_left_alone(installed):
     )
 
 
+@pytest.mark.parametrize("foreign", [
+    # The tail collides, but the directory is not ours. `.claude` has to be a
+    # whole path segment: anchoring on the bare string `.claude/hooks/` still
+    # matches this, which is how a suffix matcher quietly deletes a stranger's
+    # hook.
+    "python3 /tmp/not.claude/hooks/redmem_dispatcher.py",
+    "python3 /Users/someone/tools/hooks/redact-restore.py",
+    "python3 /opt/myclaude/hooks/guard/agent_isolation_guard.py",
+])
+def test_only_hooks_under_a_real_dot_claude_segment_are_ours(installed, foreign):
+    home, run = installed
+    path = os.path.join(home, ".claude", "settings.json")
+    settings = _settings(home)
+    settings["hooks"]["PreToolUse"].append({
+        "matcher": "Read",
+        "hooks": [{"type": "command", "command": foreign, "timeout": 10}],
+    })
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, indent=2)
+
+    run()
+
+    assert foreign in _hook_commands(_settings(home)), (
+        f"the installer deleted a hook it does not own: {foreign}"
+    )
+
+
+def test_an_interpreter_path_with_a_quote_is_refused_not_escaped(tmp_path):
+    """Escaping it would need a shell quote inside a JSON string parsed by jq;
+    getting that subtly wrong writes a settings.json that does not parse, which
+    breaks every hook rather than just this one. Refusing is the honest answer."""
+    if not shutil.which("jq"):
+        pytest.skip("install.sh requires jq")
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    quoted_dir = tmp_path / "we're here" / "bin"
+    quoted_dir.mkdir(parents=True)
+    fake = quoted_dir / "python3"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["REDMEM_PYTHON"] = str(fake)
+    proc = subprocess.run(["bash", INSTALL_SH], capture_output=True, text=True,
+                          env=env, timeout=300)
+
+    settings_path = home / ".claude" / "settings.json"
+    if settings_path.exists():
+        json.loads(settings_path.read_text())  # must never be left unparseable
+
+
 def test_an_interpreter_path_with_a_space_is_quoted(tmp_path):
     """`/Users/me/Python Builds/bin/python3` is a legal path. Written into the
     command string unquoted, whatever tokenises it tries to execute

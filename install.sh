@@ -110,6 +110,17 @@ fi
 # string, and every hook spawn would fail on the first fragment.
 PYTHON_CMD="$PYTHON_BIN"
 case "$PYTHON_BIN" in
+  *\'*)
+    # Refused rather than escaped. The command string is embedded in JSON that
+    # jq parses with --argjson, so shell-escaping a quote (' -> '\'') would put
+    # a backslash inside a JSON string literal and produce settings.json that
+    # does not parse. Hand-rolling two layers of quoting to support a python
+    # path containing an apostrophe is not worth the way it fails.
+    echo "  ERROR: refusing to install - the interpreter path contains a single quote."
+    echo "    $PYTHON_BIN"
+    echo "  Use REDMEM_PYTHON to point at an interpreter whose path has none."
+    exit 1
+    ;;
   *[[:space:]]*) PYTHON_CMD="'$PYTHON_BIN'" ;;
 esac
 
@@ -257,9 +268,9 @@ if [ "$HAS_HOOKS" = "true" ]; then
         # comparison would fail to clean up entries written by any other
         # machine, any earlier version, or a different interpreter — and every
         # re-install would append a duplicate instead of replacing.
-        ((.hooks[0].command // "") | endswith(".claude/hooks/redact-restore.py") | not) and
-        ((.hooks[0].command // "") | endswith(".claude/hooks/redmem_dispatcher.py") | not) and
-        ((.hooks[0].command // "") | endswith(".claude/hooks/redact-secrets.sh") | not)
+        ((.hooks[0].command // "") | (endswith("/.claude/hooks/redact-restore.py") or endswith("~/.claude/hooks/redact-restore.py")) | not) and
+        ((.hooks[0].command // "") | (endswith("/.claude/hooks/redmem_dispatcher.py") or endswith("~/.claude/hooks/redmem_dispatcher.py")) | not) and
+        ((.hooks[0].command // "") | (endswith("/.claude/hooks/redact-secrets.sh") or endswith("~/.claude/hooks/redact-secrets.sh")) | not)
       ));
 
     .hooks.PreToolUse = ((.hooks.PreToolUse // []) | remove_old) + [$dispatch_pre]
@@ -303,7 +314,7 @@ if [ "$INSTALL_GUARD" = true ]; then
         # Suffix match, for the same reason as remove_old above: the
         # interpreter prefix is resolved per machine, so exact comparison
         # would duplicate this entry on every re-install.
-        ((.hooks[0].command // "") | endswith(".claude/hooks/guard/agent_isolation_guard.py") | not)
+        ((.hooks[0].command // "") | (endswith("/.claude/hooks/guard/agent_isolation_guard.py") or endswith("~/.claude/hooks/guard/agent_isolation_guard.py")) | not)
       ));
       .hooks.PreToolUse  = ((.hooks.PreToolUse  // []) | strip_guard) + [$guard_pre]
     | .hooks.PostToolUse = ((.hooks.PostToolUse // []) | strip_guard) + [$guard_post]
