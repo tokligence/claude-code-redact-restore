@@ -171,7 +171,7 @@ SHIELD_SESSION_END='{"hooks":[{"type":"command","command":"python3 ~/.claude/hoo
 # PostToolUse, UserPromptSubmit, Stop, PreCompact, and SessionStart —
 # it internally routes to shield / memory / autopilot / image compressor.
 # One matcher per event keeps settings.json clean.
-DISPATCH_PRE='{"matcher":"Read|Write|Edit|Bash","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
+DISPATCH_PRE='{"matcher":"Read|Write|Edit|MultiEdit|NotebookEdit|Bash","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
 DISPATCH_POST='{"matcher":"Read|Write|Edit|Bash|TodoWrite|TodoRead|EnterPlanMode|ExitPlanMode|TaskCreate|TaskUpdate","hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
 DISPATCH_PROMPT='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":5}]}'
 DISPATCH_COMPACT='{"hooks":[{"type":"command","command":"python3 ~/.claude/hooks/redmem_dispatcher.py","timeout":30,"statusMessage":"Archiving session..."}]}'

@@ -243,6 +243,18 @@ def handle_pretooluse_bash_guard(data: dict) -> dict | None:
         return None
 
 
+def handle_pretooluse_deploy_config(data: dict) -> dict | None:
+    """Ask before editing a file the deploy pipeline consumes. Active for all
+    sessions; fail-open. See hooks/deploy_config_guard.py for the failure mode
+    it exists for."""
+    try:
+        from deploy_config_guard import check_deploy_config
+        return check_deploy_config(data)
+    except Exception as e:
+        sys.stderr.write(f"[redmem] deploy config guard error: {e}\n")
+        return None
+
+
 def handle_pretooluse_image_compress(data: dict) -> dict | None:
     """Transparently downscale large images before Claude reads them, to
     save vision tokens. Active for all sessions; fail-open."""
@@ -461,6 +473,15 @@ def main():
         guard_resp = handle_pretooluse_bash_guard(data)
         if guard_resp:
             print(json.dumps(guard_resp))
+            sys.exit(0)
+
+        # Deploy-config guard (all sessions). Runs before the image
+        # compressor because it only inspects Edit/Write paths and never
+        # rewrites tool_input — an `ask` here must reach the user rather
+        # than be pre-empted by a later handler's response.
+        deploy_resp = handle_pretooluse_deploy_config(data)
+        if deploy_resp:
+            print(json.dumps(deploy_resp))
             sys.exit(0)
 
         # Image compressor (all sessions). Wins if it rewrites file_path,
