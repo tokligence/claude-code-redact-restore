@@ -78,7 +78,7 @@ fi
 #      that cannot protect anything.
 PYTHON_BIN=""
 for _candidate in \
-  "$REDMEM_PYTHON" \
+  "${REDMEM_PYTHON:-}" \
   "$(command -v python3 2>/dev/null)" \
   /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 /opt/homebrew/bin/python3.11 \
   /usr/local/bin/python3 /usr/bin/python3
@@ -92,7 +92,9 @@ do
 done
 
 if [ -z "$PYTHON_BIN" ]; then
-  echo "  ERROR: no python3 with the 'cryptography' module was found."
+  echo "  ERROR: refusing to install — this would disable redaction."
+  echo ""
+  echo "  No python3 with the 'cryptography' module was found."
   echo ""
   echo "  The secret shield stores its placeholder->secret mapping encrypted."
   echo "  An interpreter without 'cryptography' cannot read it, so the shield"
@@ -103,6 +105,13 @@ if [ -z "$PYTHON_BIN" ]; then
   echo "    REDMEM_PYTHON=/path/to/python3 ./install.sh"
   exit 1
 fi
+
+# A path with a space would be split by whatever tokenises the command
+# string, and every hook spawn would fail on the first fragment.
+PYTHON_CMD="$PYTHON_BIN"
+case "$PYTHON_BIN" in
+  *[[:space:]]*) PYTHON_CMD="'$PYTHON_BIN'" ;;
+esac
 
 echo "  -> Hook interpreter: $PYTHON_BIN"
 if [ "$PYTHON_BIN" != "$(command -v python3 2>/dev/null)" ]; then
@@ -215,18 +224,18 @@ echo "  -> Configuring Claude Code settings..."
 
 # SessionEnd still calls shield directly — it's a simple cleanup pass
 # and doesn't need the dispatcher's multi-module routing.
-SHIELD_SESSION_END='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redact-restore.py","timeout":5}]}'
+SHIELD_SESSION_END='{"hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redact-restore.py","timeout":5}]}'
 
 # Dispatcher hooks. The dispatcher is the single gateway for PreToolUse,
 # PostToolUse, UserPromptSubmit, Stop, PreCompact, and SessionStart —
 # it internally routes to shield / memory / autopilot / image compressor.
 # One matcher per event keeps settings.json clean.
-DISPATCH_PRE='{"matcher":"Read|Write|Edit|MultiEdit|NotebookEdit|Bash","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
-DISPATCH_POST='{"matcher":"Read|Write|Edit|Bash|TodoWrite|TodoRead|EnterPlanMode|ExitPlanMode|TaskCreate|TaskUpdate","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
-DISPATCH_PROMPT='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":5}]}'
-DISPATCH_COMPACT='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":30,"statusMessage":"Archiving session..."}]}'
-DISPATCH_RESUME='{"matcher":"resume","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10,"statusMessage":"Loading session memory..."}]}'
-DISPATCH_STOP='{"hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/redmem_dispatcher.py","timeout":15}]}'
+DISPATCH_PRE='{"matcher":"Read|Write|Edit|MultiEdit|NotebookEdit|Bash","hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
+DISPATCH_POST='{"matcher":"Read|Write|Edit|Bash|TodoWrite|TodoRead|EnterPlanMode|ExitPlanMode|TaskCreate|TaskUpdate","hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10}]}'
+DISPATCH_PROMPT='{"hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redmem_dispatcher.py","timeout":5}]}'
+DISPATCH_COMPACT='{"hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redmem_dispatcher.py","timeout":30,"statusMessage":"Archiving session..."}]}'
+DISPATCH_RESUME='{"matcher":"resume","hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redmem_dispatcher.py","timeout":10,"statusMessage":"Loading session memory..."}]}'
+DISPATCH_STOP='{"hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/redmem_dispatcher.py","timeout":15}]}'
 
 if [ -f "$SETTINGS_FILE" ]; then
   EXISTING=$(cat "$SETTINGS_FILE")
@@ -248,9 +257,9 @@ if [ "$HAS_HOOKS" = "true" ]; then
         # comparison would fail to clean up entries written by any other
         # machine, any earlier version, or a different interpreter — and every
         # re-install would append a duplicate instead of replacing.
-        ((.hooks[0].command // "") | endswith("hooks/redact-restore.py") | not) and
-        ((.hooks[0].command // "") | endswith("hooks/redmem_dispatcher.py") | not) and
-        ((.hooks[0].command // "") | endswith("hooks/redact-secrets.sh") | not)
+        ((.hooks[0].command // "") | endswith(".claude/hooks/redact-restore.py") | not) and
+        ((.hooks[0].command // "") | endswith(".claude/hooks/redmem_dispatcher.py") | not) and
+        ((.hooks[0].command // "") | endswith(".claude/hooks/redact-secrets.sh") | not)
       ));
 
     .hooks.PreToolUse = ((.hooks.PreToolUse // []) | remove_old) + [$dispatch_pre]
@@ -282,8 +291,8 @@ echo "  OK: Updated $SETTINGS_FILE"
 
 # ── Guard hook entries in settings.json (opt-in) ────────────────────────
 if [ "$INSTALL_GUARD" = true ]; then
-  GUARD_PRE='{"matcher":"Agent","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
-  GUARD_POST='{"matcher":"Agent","hooks":[{"type":"command","command":"'"$PYTHON_BIN"' ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
+  GUARD_PRE='{"matcher":"Agent","hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
+  GUARD_POST='{"matcher":"Agent","hooks":[{"type":"command","command":"'"$PYTHON_CMD"' ~/.claude/hooks/guard/agent_isolation_guard.py","timeout":5}]}'
 
   GUARD_UPDATED=$(cat "$SETTINGS_FILE" | jq \
     --argjson guard_pre "$GUARD_PRE" \
@@ -294,7 +303,7 @@ if [ "$INSTALL_GUARD" = true ]; then
         # Suffix match, for the same reason as remove_old above: the
         # interpreter prefix is resolved per machine, so exact comparison
         # would duplicate this entry on every re-install.
-        ((.hooks[0].command // "") | endswith("guard/agent_isolation_guard.py") | not)
+        ((.hooks[0].command // "") | endswith(".claude/hooks/guard/agent_isolation_guard.py") | not)
       ));
       .hooks.PreToolUse  = ((.hooks.PreToolUse  // []) | strip_guard) + [$guard_pre]
     | .hooks.PostToolUse = ((.hooks.PostToolUse // []) | strip_guard) + [$guard_post]

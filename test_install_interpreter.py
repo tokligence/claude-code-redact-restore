@@ -117,6 +117,76 @@ def test_reinstalling_does_not_duplicate_hook_entries(installed):
     assert after == before, f"re-install changed entry counts: {before} -> {after}"
 
 
+def test_a_users_own_hook_with_a_similar_path_is_left_alone(installed):
+    """Matching by suffix is what lets the installer clean up entries written by
+    an older version or a different interpreter. The cost is that it can reach
+    too far: somebody else's `~/tools/hooks/redmem_dispatcher.py` is not ours to
+    delete. Anchor on `.claude/hooks/`, which is the only place we install to."""
+    home, run = installed
+    path = os.path.join(home, ".claude", "settings.json")
+    foreign = "python3 /Users/someone/tools/hooks/redmem_dispatcher.py"
+    settings = _settings(home)
+    settings["hooks"]["PreToolUse"].append({
+        "matcher": "Read",
+        "hooks": [{"type": "command", "command": foreign, "timeout": 10}],
+    })
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, indent=2)
+
+    run()
+
+    assert foreign in _hook_commands(_settings(home)), (
+        "the installer deleted a hook it does not own — suffix matching reached "
+        "outside ~/.claude/hooks/"
+    )
+
+
+def test_an_interpreter_path_with_a_space_is_quoted(tmp_path):
+    """`/Users/me/Python Builds/bin/python3` is a legal path. Written into the
+    command string unquoted, whatever tokenises it tries to execute
+    `/Users/me/Python` and every hook spawn fails."""
+    if not shutil.which("jq"):
+        pytest.skip("install.sh requires jq")
+    try:
+        import cryptography  # noqa: F401
+    except ImportError:
+        pytest.skip("this interpreter cannot serve as a candidate")
+
+    # A symlink at a spaced path does NOT reproduce this: the installer
+    # normalises its choice through `sys.executable`, which resolves to the
+    # real binary and quietly removes the space. The first version of this test
+    # used one and passed against the unfixed installer — a test that holds for
+    # the wrong reason. A venv is the real case (`/Users/me/My Env/bin/python3`
+    # reports itself), and it inherits cryptography from the parent.
+    venv_dir = tmp_path / "my python env"
+    subprocess.run([sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)],
+                   check=True, capture_output=True, timeout=300)
+    spaced = venv_dir / "bin" / "python3"
+    assert " " in subprocess.run(
+        [str(spaced), "-c", "import sys; print(sys.executable)"],
+        capture_output=True, text=True, timeout=60).stdout, (
+        "the venv did not report a spaced sys.executable — this test would "
+        "again be proving nothing"
+    )
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["REDMEM_PYTHON"] = str(spaced)
+    proc = subprocess.run(["bash", INSTALL_SH], capture_output=True, text=True,
+                          env=env, timeout=300)
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-1000:]
+
+    for cmd in _hook_commands(_settings(home)):
+        if cmd.endswith(".sh"):
+            continue
+        interpreter = cmd.split(" ~/")[0]
+        assert not (" " in interpreter and not interpreter.startswith("'")), (
+            f"unquoted interpreter path containing a space: {cmd!r}"
+        )
+
+
 def test_entries_written_by_an_older_version_are_replaced_not_kept(installed):
     """The form this repo used to write. Leaving it behind means two dispatchers
     run for every tool call, and the stale one may point at a hook that no
