@@ -253,3 +253,42 @@ install.sh  uninstall.sh
 test_*.py                ~800 tests, hermetic, no network
 docs/design/architecture.md
 ```
+
+## 改动流程：worktree fork → squash merge（硬规则，全部 tokligence 仓）
+
+**任何改动都先开 worktree，不在主工作树里直接改**，然后 squash 合回主集成分支。
+
+```bash
+git worktree add .claude/worktrees/<name> -b <branch> <base>
+# 在 worktree 里改、跑测试、提交
+git merge --squash <branch> && git commit      # 主工作树里合，一个 feature 一个 commit
+git worktree remove .claude/worktrees/<name> && git branch -D <branch> && git worktree prune
+```
+
+### 为什么不只是"别切分支"
+
+以前的规则是"绝不在共享仓里 `git checkout` / `git switch`"，防的是**分支冲突**。
+但真正踩过的坑是**文件冲突**：主工作树里跑任何会写文件的命令 —— `npm ci`、代码生成器
+（如 `npm run rankings:sync` 会重写 `src/lib/model-rankings-auto.ts`）、`git rebase`
+的 autostash —— 都会动到别人/别的 session 正在编辑的文件，而且不留痕迹。
+
+所以边界不是"有没有切分支"，是**有没有写文件**。写文件就进 worktree。
+
+### 收尾（同样是硬规则）
+
+合并后立刻清理，否则 worktree 会累积（本仓曾积到 31 个）：
+
+```bash
+git worktree list                    # 定期审计
+git -C <path> log --oneline <base>..HEAD    # 空 = 已合并
+git -C <path> status --porcelain            # 空 = 无未提交改动
+# 两个都空 → 安全删除
+```
+
+**主工作树必须留在主集成分支上**，绝不留在旧 feature 分支 —— 下一个 session 在这个仓
+启动会读到过时代码并据此决策。
+
+### 唯一例外：promote 不 squash
+
+`staging → main` 的 promote 是 fast-forward / merge commit，**不能 squash**。
+squash 会切断祖先链，`git log origin/main..origin/staging` 从此失真，看不出线上到底发布了什么。
