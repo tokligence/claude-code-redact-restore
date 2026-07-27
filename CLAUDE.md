@@ -292,3 +292,69 @@ git -C <path> status --porcelain            # 空 = 无未提交改动
 
 `staging → main` 的 promote 是 fast-forward / merge commit，**不能 squash**。
 squash 会切断祖先链，`git log origin/main..origin/staging` 从此失真，看不出线上到底发布了什么。
+
+## 零、SOP —— 每次改动都照这个走
+
+### A. 开发：worktree fork → squash merge（硬规则，全部 tokligence 仓）
+
+**任何改动都先开 worktree，不在主工作树里直接改。**
+
+```bash
+git worktree add .claude/worktrees/<name> -b <branch> <base>   # base 写死，别靠默认
+# 在 worktree 里改、跑测试、提交
+git merge --squash <branch> && git commit                       # 回到主工作树合，一 feature 一 commit
+git worktree remove .claude/worktrees/<name> && git branch -d <branch> && git worktree prune
+```
+
+边界不是"有没有切分支"，是**有没有写文件**。以前的规则只禁 `git checkout`（防分支冲突），
+但真正踩到的是**文件冲突**：主工作树里跑 `npm ci`、代码生成器、`git rebase` 的 autostash，
+都会动到别人正在编辑的文件且不留痕迹。**写文件就进 worktree。**
+
+收尾同样是硬规则 —— 不清理就会累积（fe 仓曾积到 **31 个**）：
+
+```bash
+git worktree list                                  # 定期审计
+git -C <path> log --oneline <base>..HEAD           # 空 = 已合并
+git -C <path> status --porcelain                   # 空 = 无未提交改动
+# 两个都空 → 安全删除；主工作树必须留在主集成分支上
+```
+
+### B. 发布：work → staging → promote → main
+
+**所有改动先进 `staging`，不要直接合 `main`。** promote 两种姿势都合法：
+
+```bash
+git push origin origin/staging:main       # 快进
+# 或 PR staging -> main，选 "Create a merge commit"
+```
+
+**`squash promote` 绝对禁止** —— 内容一样所以看着什么都没丢，但祖先链断了，
+`git log origin/main..origin/staging` 从此失真。装了 `validate-promote.yml` 的仓会红。
+
+> 注意这条只适用于 **staging 真正在流程里**的仓。有些仓的 staging 是遗留死分支
+> （如 tokligence-docs，staging 停在 6 个月前，实际流程是 PR → main）——那种仓
+> 不要装守卫，也不要"收敛"，收敛等于把废弃内容复活。先看 `git log -1 origin/staging` 的日期。
+
+### C. 交付前的验证纪律
+
+1. **`cmd | tail` 的退出码是 `tail` 的** —— 判断成败用 `cmd > out 2>&1; echo $?`
+2. **绿色结果必须带用例数**。`exit 0` 不算 —— 依赖没装时套件一个用例没跑也会 exit 0
+3. **先证明红，而且要精准的红** —— 只退回新逻辑看"恰好该红的红"，全红只证明函数是新的
+4. **警惕因错误原因而通过的测试** —— 断言依赖的前提，把前提也断言掉
+5. **能测量就别推断**；**别人的报告（subagent / codex）要独立复核**
+6. **合并前的基线检查必须先 `git fetch`** —— 拿未 fetch 的本地引用当基线等于没查
+
+### D. Tony 的协作偏好
+
+- **中文回复**（除非 Tony 用英文）。**不写 Co-Authored-By。不加 emoji。**
+- 回答简短直接，不要无意义总结
+- **探索性问题**先给 2–3 句推荐 + 主要 tradeoff，不要直接开写；**明确任务**直接动手
+- "动手吧" = 别再问了，直接做
+- **部署必须经 Tony 明确同意**。默认本地提交 + 说明变更 + 问"要部署吗"
+- **能并发就并发** —— 独立任务用多个 subagent 同时跑，一条消息里发多个 Agent 调用
+- **代码 PR 一律过 Codex 对抗性 review 至收敛**（纯文档改动豁免）。Codex 是对抗性 review
+  **不是真理裁判**：每条 finding 自己 verify 后再 accept/reject，拒绝必须基于事实，
+  判定理由写进 commit message
+- **subagent prompt 必须 literal quote 合约原文**，不能只写"参考 §X"——它没有对话历史，
+  只能从 prompt 看世界
+- commit message 讲**为什么会坏、修复保证了什么**，不是讲改了什么
